@@ -203,6 +203,13 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     const servingMode = this.getServingMode();
     const chatRequest = this.buildChatRequest(options);
 
+    // Debug logging
+    if (process.env.OCI_DEBUG) {
+      console.error('[OCI Debug] Model:', this.modelId);
+      console.error('[OCI Debug] Serving Mode:', JSON.stringify(servingMode));
+      console.error('[OCI Debug] Chat Request:', JSON.stringify(chatRequest, null, 2));
+    }
+
     const chatDetails: oci.models.ChatDetails = {
       compartmentId: this.settings.compartmentId || process.env.OCI_COMPARTMENT_ID || '',
       servingMode,
@@ -286,6 +293,13 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
   }> {
     const servingMode = this.getServingMode();
     const chatRequest = this.buildChatRequest(options);
+
+    // Debug logging
+    if (process.env.OCI_DEBUG) {
+      console.error('[OCI Debug Stream] Model:', this.modelId);
+      console.error('[OCI Debug Stream] Serving Mode:', JSON.stringify(servingMode));
+      console.error('[OCI Debug Stream] Chat Request:', JSON.stringify(chatRequest, null, 2));
+    }
 
     const chatDetails: oci.models.ChatDetails = {
       compartmentId: this.settings.compartmentId || process.env.OCI_COMPARTMENT_ID || '',
