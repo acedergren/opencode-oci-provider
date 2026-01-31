@@ -2,7 +2,7 @@
  * OpenCode OCI Provider - AI SDK V2 compatible provider for OCI GenAI
  *
  * This package provides a LanguageModelV2 implementation for OpenCode,
- * which uses AI SDK v2 interfaces internally.
+ * with SWE-optimized defaults and tool calling support.
  */
 import type {
   LanguageModelV2,
@@ -13,8 +13,9 @@ import type {
   LanguageModelV2Content,
   LanguageModelV2Usage,
   LanguageModelV2Text,
+  LanguageModelV2ToolCall,
+  LanguageModelV2FunctionTool,
   ProviderV2,
-  NoSuchModelError,
 } from '@ai-sdk/provider';
 import * as oci from 'oci-generativeaiinference';
 import * as common from 'oci-common';
@@ -25,6 +26,70 @@ export interface OCIProviderSettings {
   configProfile?: string;
   servingMode?: 'on-demand' | 'dedicated';
   endpointId?: string;
+}
+
+/**
+ * Model-specific SWE presets for optimal coding performance
+ */
+interface SWEPreset {
+  temperature: number;
+  topP: number;
+  frequencyPenalty: number;
+  presencePenalty: number;
+  supportsTools: boolean;
+}
+
+const SWE_PRESETS: Record<string, SWEPreset> = {
+  // Cohere models - good for instruction following
+  'cohere': {
+    temperature: 0.2,
+    topP: 0.9,
+    frequencyPenalty: 0,
+    presencePenalty: 0,
+    supportsTools: false, // Cohere uses different tool format
+  },
+  // Google Gemini - excellent for code
+  'google': {
+    temperature: 0.1,
+    topP: 0.95,
+    frequencyPenalty: 0,
+    presencePenalty: 0,
+    supportsTools: true,
+  },
+  // xAI Grok - optimized for code
+  'xai': {
+    temperature: 0.1,
+    topP: 0.9,
+    frequencyPenalty: 0,
+    presencePenalty: 0,
+    supportsTools: true,
+  },
+  // Meta Llama - balanced for code
+  'meta': {
+    temperature: 0.2,
+    topP: 0.9,
+    frequencyPenalty: 0,
+    presencePenalty: 0,
+    supportsTools: true,
+  },
+  // Default fallback
+  'default': {
+    temperature: 0.2,
+    topP: 0.9,
+    frequencyPenalty: 0,
+    presencePenalty: 0,
+    supportsTools: true,
+  },
+};
+
+function getModelProvider(modelId: string): string {
+  const prefix = modelId.split('.')[0];
+  return prefix || 'default';
+}
+
+function getSWEPreset(modelId: string): SWEPreset {
+  const provider = getModelProvider(modelId);
+  return SWE_PRESETS[provider] || SWE_PRESETS['default'];
 }
 
 type ModelFamily = 'cohere' | 'generic';
@@ -51,6 +116,7 @@ function mapFinishReason(raw: string | undefined): LanguageModelV2FinishReason {
       return 'stop';
     case 'TOOL_CALL':
     case 'tool_calls':
+    case 'TOOL_USE':
       return 'tool-calls';
     case 'CONTENT_FILTER':
     case 'content_filter':
@@ -76,6 +142,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
   private readonly client: oci.GenerativeAiInferenceClient;
   private readonly modelFamily: ModelFamily;
+  private readonly swePreset: SWEPreset;
 
   constructor(
     readonly modelId: string,
@@ -95,6 +162,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     }
 
     this.modelFamily = getModelFamily(modelId);
+    this.swePreset = getSWEPreset(modelId);
   }
 
   get provider(): string {
@@ -123,14 +191,17 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     }
 
     const chatResult = response.chatResult;
-    let text = '';
+    const content: LanguageModelV2Content[] = [];
     let finishReason: LanguageModelV2FinishReason;
     let promptTokens = 0;
     let completionTokens = 0;
 
     if (this.modelFamily === 'cohere') {
       const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
-      text = cohereResponse?.text || '';
+      const text = cohereResponse?.text || '';
+      if (text) {
+        content.push({ type: 'text', text } as LanguageModelV2Text);
+      }
       finishReason = mapFinishReason(cohereResponse?.finishReason);
     } else {
       const genericResponse = chatResult?.chatResponse as oci.models.GenericChatResponse | undefined;
@@ -138,21 +209,29 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       const message = choice?.message as oci.models.AssistantMessage | undefined;
 
       if (message?.content && Array.isArray(message.content)) {
-        text = message.content
-          .filter((c): c is oci.models.TextContent => c.type === 'TEXT')
-          .map(c => c.text)
-          .join('');
+        for (const part of message.content) {
+          if (part.type === 'TEXT') {
+            const textPart = part as oci.models.TextContent;
+            content.push({ type: 'text', text: textPart.text } as LanguageModelV2Text);
+          } else if (part.type === 'TOOL_CALL') {
+            const toolPart = part as any;
+            const args = typeof toolPart.arguments === 'string'
+              ? toolPart.arguments
+              : JSON.stringify(toolPart.arguments || toolPart.function?.arguments || {});
+            content.push({
+              type: 'tool-call',
+              toolCallId: toolPart.id || generateId(),
+              toolName: toolPart.name || toolPart.function?.name,
+              input: args, // V2 uses `input` as stringified JSON
+            } as LanguageModelV2ToolCall);
+          }
+        }
       }
 
       finishReason = mapFinishReason(choice?.finishReason);
       const usageInfo = genericResponse?.usage;
       promptTokens = usageInfo?.promptTokens || 0;
       completionTokens = usageInfo?.completionTokens || 0;
-    }
-
-    const content: LanguageModelV2Content[] = [];
-    if (text) {
-      content.push({ type: 'text', text } as LanguageModelV2Text);
     }
 
     return {
@@ -183,7 +262,6 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         const textId = generateId();
 
         try {
-          // Emit stream-start
           controller.enqueue({
             type: 'stream-start',
             warnings: [],
@@ -205,6 +283,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           let finishReason: LanguageModelV2FinishReason;
           let promptTokens = 0;
           let completionTokens = 0;
+          const toolCalls: LanguageModelV2ToolCall[] = [];
 
           if (modelFamily === 'cohere') {
             const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
@@ -216,10 +295,23 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             const message = choice?.message as oci.models.AssistantMessage | undefined;
 
             if (message?.content && Array.isArray(message.content)) {
-              text = message.content
-                .filter((c): c is oci.models.TextContent => c.type === 'TEXT')
-                .map(c => c.text)
-                .join('');
+              for (const part of message.content) {
+                if (part.type === 'TEXT') {
+                  const textPart = part as oci.models.TextContent;
+                  text += textPart.text;
+                } else if (part.type === 'TOOL_CALL') {
+                  const toolPart = part as any;
+                  const args = typeof toolPart.arguments === 'string'
+                    ? toolPart.arguments
+                    : JSON.stringify(toolPart.arguments || toolPart.function?.arguments || {});
+                  toolCalls.push({
+                    type: 'tool-call',
+                    toolCallId: toolPart.id || generateId(),
+                    toolName: toolPart.name || toolPart.function?.name,
+                    input: args,
+                  });
+                }
+              }
             }
 
             finishReason = mapFinishReason(choice?.finishReason);
@@ -228,7 +320,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             completionTokens = usageInfo?.completionTokens || 0;
           }
 
-          // Emit text as deltas (V2 format with id)
+          // Emit text content
           if (text) {
             controller.enqueue({ type: 'text-start', id: textId });
 
@@ -244,7 +336,28 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             controller.enqueue({ type: 'text-end', id: textId });
           }
 
-          // Emit finish (V2 format)
+          // Emit tool calls using V2 format (tool-input-* events, then full tool-call)
+          for (const toolCall of toolCalls) {
+            const toolInputId = generateId();
+            // Stream tool input
+            controller.enqueue({
+              type: 'tool-input-start',
+              id: toolInputId,
+              toolName: toolCall.toolName,
+            });
+            controller.enqueue({
+              type: 'tool-input-delta',
+              id: toolInputId,
+              delta: toolCall.input,
+            });
+            controller.enqueue({
+              type: 'tool-input-end',
+              id: toolInputId,
+            });
+            // Emit complete tool call
+            controller.enqueue(toolCall);
+          }
+
           controller.enqueue({
             type: 'finish',
             finishReason,
@@ -280,6 +393,13 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     return this.buildGenericChatRequest(options);
   }
 
+  /**
+   * Apply SWE defaults when caller doesn't specify values
+   */
+  private applyDefaults<T>(value: T | undefined, defaultValue: T): T {
+    return value !== undefined ? value : defaultValue;
+  }
+
   private buildCohereChatRequest(options: LanguageModelV2CallOptions): oci.models.CohereChatRequest {
     const prompt = this.convertMessagesToCoherePrompt(options.prompt);
 
@@ -287,26 +407,47 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       apiFormat: oci.models.CohereChatRequest.apiFormat,
       message: prompt,
       maxTokens: options.maxOutputTokens,
-      temperature: options.temperature,
-      topP: options.topP,
-      frequencyPenalty: options.frequencyPenalty,
-      presencePenalty: options.presencePenalty,
+      temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
+      topP: this.applyDefaults(options.topP, this.swePreset.topP),
+      frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
+      presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
     };
   }
 
   private buildGenericChatRequest(options: LanguageModelV2CallOptions): oci.models.GenericChatRequest {
     const messages = this.convertMessagesToGenericFormat(options.prompt);
 
+    // Build tools if provided and model supports them
+    const tools = this.swePreset.supportsTools && options.tools
+      ? this.convertTools(options.tools)
+      : undefined;
+
     return {
       apiFormat: oci.models.GenericChatRequest.apiFormat,
       messages,
       maxTokens: options.maxOutputTokens,
-      temperature: options.temperature,
-      topP: options.topP,
-      frequencyPenalty: options.frequencyPenalty,
-      presencePenalty: options.presencePenalty,
+      temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
+      topP: this.applyDefaults(options.topP, this.swePreset.topP),
+      frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
+      presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
       stop: options.stopSequences,
+      ...(tools && { tools }),
     };
+  }
+
+  private convertTools(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
+    if (!tools || tools.length === 0) return undefined;
+
+    return tools
+      .filter((tool): tool is LanguageModelV2FunctionTool => tool.type === 'function')
+      .map(tool => ({
+        type: 'FUNCTION',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.inputSchema,
+        },
+      }));
   }
 
   private convertMessagesToCoherePrompt(prompt: LanguageModelV2CallOptions['prompt']): string {
@@ -372,6 +513,20 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               text: part.text,
             };
             content.push(textContent);
+          } else if (part.type === 'file') {
+            // Handle file/image content
+            const fileData = part.data;
+            if (typeof fileData === 'string') {
+              // Base64 data
+              content.push({
+                type: 'IMAGE',
+                source: {
+                  type: 'BASE64',
+                  mediaType: part.mediaType || 'image/png',
+                  data: fileData,
+                },
+              } as any);
+            }
           }
         }
 
@@ -389,6 +544,14 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               text: part.text,
             };
             content.push(textContent);
+          } else if (part.type === 'tool-call') {
+            // Handle tool calls in assistant messages
+            content.push({
+              type: 'TOOL_CALL',
+              id: part.toolCallId,
+              name: part.toolName,
+              arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input),
+            } as any);
           }
         }
 
@@ -397,14 +560,29 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           content,
         } as oci.models.AssistantMessage);
       } else if (role === 'tool') {
-        const textContent: oci.models.TextContent = {
-          type: oci.models.TextContent.type,
-          text: JSON.stringify(message.content),
-        };
-        messages.push({
-          role: 'TOOL',
-          content: [textContent],
-        } as oci.models.ToolMessage);
+        // Handle tool result messages
+        for (const part of message.content) {
+          if (part.type === 'tool-result') {
+            // V2 uses `output` with { type, value } structure
+            let resultText: string;
+            if (part.output.type === 'text' || part.output.type === 'error-text') {
+              resultText = part.output.value;
+            } else if (part.output.type === 'json') {
+              resultText = JSON.stringify(part.output.value);
+            } else {
+              resultText = String(part.output);
+            }
+            const textContent: oci.models.TextContent = {
+              type: oci.models.TextContent.type,
+              text: resultText,
+            };
+            messages.push({
+              role: 'TOOL',
+              content: [textContent],
+              toolCallId: part.toolCallId,
+            } as any);
+          }
+        }
       }
     }
 
