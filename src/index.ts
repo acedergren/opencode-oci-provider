@@ -2,7 +2,7 @@
  * OpenCode OCI Provider - AI SDK V2 compatible provider for OCI GenAI
  *
  * This package provides a LanguageModelV2 implementation for OpenCode,
- * with SWE-optimized defaults and tool calling support.
+ * with SWE-optimized defaults and tool calling support (including MCP).
  */
 import type {
   LanguageModelV2,
@@ -16,6 +16,7 @@ import type {
   LanguageModelV2ToolCall,
   LanguageModelV2FunctionTool,
   ProviderV2,
+  JSONSchema7,
 } from '@ai-sdk/provider';
 import * as oci from 'oci-generativeaiinference';
 import * as common from 'oci-common';
@@ -40,13 +41,13 @@ interface SWEPreset {
 }
 
 const SWE_PRESETS: Record<string, SWEPreset> = {
-  // Cohere models - good for instruction following
+  // Cohere models - good for instruction following, supports tools
   'cohere': {
     temperature: 0.2,
     topP: 0.9,
     frequencyPenalty: 0,
     presencePenalty: 0,
-    supportsTools: false, // Cohere uses different tool format
+    supportsTools: true,
   },
   // Google Gemini - excellent for code
   'google': {
@@ -136,6 +137,30 @@ function createUsage(promptTokens?: number, completionTokens?: number): Language
   };
 }
 
+/**
+ * Convert JSON Schema to Cohere parameter definitions
+ */
+function jsonSchemaToCohereparams(schema: JSONSchema7): Record<string, any> {
+  const params: Record<string, any> = {};
+
+  if (schema.type === 'object' && schema.properties) {
+    const required = new Set(schema.required || []);
+
+    for (const [name, propDef] of Object.entries(schema.properties)) {
+      if (typeof propDef === 'boolean') continue;
+      const propSchema = propDef as JSONSchema7;
+
+      params[name] = {
+        type: propSchema.type || 'string',
+        description: propSchema.description || '',
+        isRequired: required.has(name),
+      };
+    }
+  }
+
+  return params;
+}
+
 class OCIChatLanguageModelV2 implements LanguageModelV2 {
   readonly specificationVersion = 'v2' as const;
   readonly supportedUrls: Record<string, RegExp[]> = {};
@@ -202,7 +227,21 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       if (text) {
         content.push({ type: 'text', text } as LanguageModelV2Text);
       }
-      finishReason = mapFinishReason(cohereResponse?.finishReason);
+
+      // Handle Cohere tool calls
+      const toolCalls = (cohereResponse as any)?.toolCalls;
+      if (toolCalls && Array.isArray(toolCalls)) {
+        for (const toolCall of toolCalls) {
+          content.push({
+            type: 'tool-call',
+            toolCallId: generateId(),
+            toolName: toolCall.name,
+            input: JSON.stringify(toolCall.parameters || {}),
+          } as LanguageModelV2ToolCall);
+        }
+      }
+
+      finishReason = toolCalls?.length > 0 ? 'tool-calls' : mapFinishReason(cohereResponse?.finishReason);
     } else {
       const genericResponse = chatResult?.chatResponse as oci.models.GenericChatResponse | undefined;
       const choice = genericResponse?.choices?.[0];
@@ -222,7 +261,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               type: 'tool-call',
               toolCallId: toolPart.id || generateId(),
               toolName: toolPart.name || toolPart.function?.name,
-              input: args, // V2 uses `input` as stringified JSON
+              input: args,
             } as LanguageModelV2ToolCall);
           }
         }
@@ -288,7 +327,21 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           if (modelFamily === 'cohere') {
             const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
             text = cohereResponse?.text || '';
-            finishReason = mapFinishReason(cohereResponse?.finishReason);
+
+            // Handle Cohere tool calls
+            const cohereToolCalls = (cohereResponse as any)?.toolCalls;
+            if (cohereToolCalls && Array.isArray(cohereToolCalls)) {
+              for (const toolCall of cohereToolCalls) {
+                toolCalls.push({
+                  type: 'tool-call',
+                  toolCallId: generateId(),
+                  toolName: toolCall.name,
+                  input: JSON.stringify(toolCall.parameters || {}),
+                });
+              }
+            }
+
+            finishReason = toolCalls.length > 0 ? 'tool-calls' : mapFinishReason(cohereResponse?.finishReason);
           } else {
             const genericResponse = chatResult?.chatResponse as oci.models.GenericChatResponse | undefined;
             const choice = genericResponse?.choices?.[0];
@@ -401,17 +454,25 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
   }
 
   private buildCohereChatRequest(options: LanguageModelV2CallOptions): oci.models.CohereChatRequest {
-    const prompt = this.convertMessagesToCoherePrompt(options.prompt);
+    const { message, chatHistory, toolResults } = this.convertMessagesToCohereFormat(options.prompt);
+
+    // Convert tools to Cohere format
+    const tools = this.swePreset.supportsTools && options.tools
+      ? this.convertToolsToCohere(options.tools)
+      : undefined;
 
     return {
       apiFormat: oci.models.CohereChatRequest.apiFormat,
-      message: prompt,
+      message,
+      chatHistory,
       maxTokens: options.maxOutputTokens,
       temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
       topP: this.applyDefaults(options.topP, this.swePreset.topP),
       frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
       presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
-    };
+      ...(tools && { tools }),
+      ...(toolResults && toolResults.length > 0 && { toolResults }),
+    } as any;
   }
 
   private buildGenericChatRequest(options: LanguageModelV2CallOptions): oci.models.GenericChatRequest {
@@ -435,6 +496,21 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     };
   }
 
+  /**
+   * Convert tools to Cohere format (CohereTool with CohereParameterDefinition)
+   */
+  private convertToolsToCohere(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
+    if (!tools || tools.length === 0) return undefined;
+
+    return tools
+      .filter((tool): tool is LanguageModelV2FunctionTool => tool.type === 'function')
+      .map(tool => ({
+        name: tool.name,
+        description: tool.description || '',
+        parameterDefinitions: jsonSchemaToCohereparams(tool.inputSchema as JSONSchema7),
+      }));
+  }
+
   private convertTools(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
     if (!tools || tools.length === 0) return undefined;
 
@@ -450,38 +526,106 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       }));
   }
 
-  private convertMessagesToCoherePrompt(prompt: LanguageModelV2CallOptions['prompt']): string {
+  /**
+   * Convert messages to Cohere format with chat history and tool results
+   */
+  private convertMessagesToCohereFormat(prompt: LanguageModelV2CallOptions['prompt']): {
+    message: string;
+    chatHistory: any[];
+    toolResults: any[];
+  } {
     if (!prompt || !Array.isArray(prompt)) {
-      return '';
+      return { message: '', chatHistory: [], toolResults: [] };
     }
 
-    return prompt.map(message => {
-      const role = message.role;
+    const chatHistory: any[] = [];
+    const toolResults: any[] = [];
+    let systemPreamble = '';
+    let lastUserMessage = '';
 
-      if (role === 'system') {
-        return `system: ${message.content}`;
-      }
+    for (let i = 0; i < prompt.length; i++) {
+      const msg = prompt[i];
 
-      if (role === 'user') {
-        const textParts = message.content
+      if (msg.role === 'system') {
+        systemPreamble = msg.content;
+      } else if (msg.role === 'user') {
+        // Get text from user message
+        const text = msg.content
           .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
-          .map(part => part.text);
-        return `user: ${textParts.join('\n')}`;
-      }
+          .map(part => part.text)
+          .join('\n');
 
-      if (role === 'assistant') {
-        const textParts = message.content
+        // If this is the last user message, save it as the main message
+        if (i === prompt.length - 1 || !prompt.slice(i + 1).some(m => m.role === 'user')) {
+          lastUserMessage = systemPreamble ? `${systemPreamble}\n\n${text}` : text;
+        } else {
+          chatHistory.push({
+            role: 'USER',
+            message: text,
+          });
+        }
+      } else if (msg.role === 'assistant') {
+        const text = msg.content
           .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
-          .map(part => part.text);
-        return `assistant: ${textParts.join('\n')}`;
-      }
+          .map(part => part.text)
+          .join('\n');
 
-      if (role === 'tool') {
-        return `tool: ${JSON.stringify(message.content)}`;
-      }
+        // Check for tool calls
+        const toolCallParts = msg.content.filter(part => part.type === 'tool-call');
 
-      return '';
-    }).filter(Boolean).join('\n');
+        if (toolCallParts.length > 0) {
+          // Assistant message with tool calls
+          chatHistory.push({
+            role: 'CHATBOT',
+            message: text,
+            toolCalls: toolCallParts.map(part => ({
+              name: (part as any).toolName,
+              parameters: typeof (part as any).input === 'string'
+                ? JSON.parse((part as any).input)
+                : (part as any).input,
+            })),
+          });
+        } else if (text) {
+          chatHistory.push({
+            role: 'CHATBOT',
+            message: text,
+          });
+        }
+      } else if (msg.role === 'tool') {
+        // Tool results for Cohere
+        for (const part of msg.content) {
+          if (part.type === 'tool-result') {
+            let resultValue: any;
+            if (part.output.type === 'text' || part.output.type === 'error-text') {
+              resultValue = part.output.value;
+            } else if (part.output.type === 'json') {
+              resultValue = part.output.value;
+            } else {
+              resultValue = String(part.output);
+            }
+
+            // Find the corresponding tool call from previous assistant message
+            const prevAssistant = [...chatHistory].reverse().find(m => m.role === 'CHATBOT' && m.toolCalls);
+            const toolCall = prevAssistant?.toolCalls?.find((tc: any) => {
+              // Match by looking at recent tool calls
+              return true; // Cohere matches by order
+            });
+
+            if (toolCall) {
+              toolResults.push({
+                call: {
+                  name: toolCall.name,
+                  parameters: toolCall.parameters,
+                },
+                outputs: [typeof resultValue === 'string' ? { result: resultValue } : resultValue],
+              });
+            }
+          }
+        }
+      }
+    }
+
+    return { message: lastUserMessage, chatHistory, toolResults };
   }
 
   private convertMessagesToGenericFormat(prompt: LanguageModelV2CallOptions['prompt']): oci.models.Message[] {
