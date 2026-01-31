@@ -1,0 +1,60 @@
+{
+  "name": "opencode-oci-provider",
+  "version": "0.1.0",
+  "description": "OCI GenAI provider for OpenCode with setup wizard (AI SDK V2 compatible)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "opencode-oci-setup": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts --format cjs,esm --dts",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "oci",
+    "oracle",
+    "genai",
+    "llm",
+    "ai-sdk",
+    "opencode",
+    "setup",
+    "wizard"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@inquirer/prompts": "^7.5.1",
+    "chalk": "^5.4.2",
+    "oci-common": "^2.124.0",
+    "oci-generativeai": "^2.124.0",
+    "oci-generativeaiinference": "^2.124.0"
+  },
+  "peerDependencies": {
+    "@ai-sdk/provider": ">=1.0.0 <3.0.0"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "^2.0.1",
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/acedergr/opencode-oci-provider.git"
+  }
+}
