@@ -3,6 +3,7 @@
  * OpenCode OCI Setup Wizard
  *
  * Interactive CLI to configure OCI GenAI provider for OpenCode
+ * Features dynamic model discovery to show only available models
  */
 import { select, input, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
@@ -10,7 +11,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as common from 'oci-common';
 import * as genai from 'oci-generativeai';
-import { REGIONS, formatRegionChoice, getAllRegionIds, supportsXAI } from './data/regions.js';
+import * as inference from 'oci-generativeaiinference';
+import { REGIONS, formatRegionChoice, getAllRegionIds } from './data/regions.js';
 
 interface SetupConfig {
   profile: string;
@@ -22,14 +24,51 @@ interface SetupConfig {
   customModelName?: string;
 }
 
-const POPULAR_MODELS = [
-  { value: 'cohere.command-r-plus-08-2024', name: 'Cohere Command R+ (Best quality)' },
-  { value: 'cohere.command-r-08-2024', name: 'Cohere Command R (Balanced)' },
-  { value: 'google.gemini-2.0-flash-001', name: 'Google Gemini 2.0 Flash (Fast)' },
-  { value: 'google.gemini-1.5-pro-002', name: 'Google Gemini 1.5 Pro' },
-  { value: 'xai.grok-2-1212', name: 'xAI Grok 2 (US only)' },
-  { value: 'meta.llama-3.1-405b-instruct', name: 'Meta Llama 3.1 405B' },
-  { value: 'meta.llama-3.1-70b-instruct', name: 'Meta Llama 3.1 70B' },
+interface ModelInfo {
+  id: string;
+  name: string;
+  vendor: string;
+  capabilities: string[];
+}
+
+/**
+ * Known foundation models - we'll probe these to see which are available
+ */
+const KNOWN_MODELS: ModelInfo[] = [
+  // Cohere models
+  { id: 'cohere.command-a-reasoning-08-2025', name: 'Cohere Command A Reasoning', vendor: 'cohere', capabilities: ['chat', 'reasoning'] },
+  { id: 'cohere.command-a-vision-07-2025', name: 'Cohere Command A Vision', vendor: 'cohere', capabilities: ['chat', 'vision'] },
+  { id: 'cohere.command-a-03-2025', name: 'Cohere Command A', vendor: 'cohere', capabilities: ['chat'] },
+  { id: 'cohere.command-r-08-2024', name: 'Cohere Command R', vendor: 'cohere', capabilities: ['chat'] },
+  { id: 'cohere.command-r-plus-08-2024', name: 'Cohere Command R+', vendor: 'cohere', capabilities: ['chat'] },
+
+  // Google models
+  { id: 'google.gemini-2.5-pro', name: 'Google Gemini 2.5 Pro', vendor: 'google', capabilities: ['chat', 'vision'] },
+  { id: 'google.gemini-2.5-flash', name: 'Google Gemini 2.5 Flash', vendor: 'google', capabilities: ['chat', 'vision'] },
+  { id: 'google.gemini-2.5-flash-lite', name: 'Google Gemini 2.5 Flash Lite', vendor: 'google', capabilities: ['chat'] },
+  { id: 'google.gemini-2.0-flash-001', name: 'Google Gemini 2.0 Flash', vendor: 'google', capabilities: ['chat'] },
+  { id: 'google.gemini-1.5-pro-002', name: 'Google Gemini 1.5 Pro', vendor: 'google', capabilities: ['chat', 'vision'] },
+
+  // Meta models
+  { id: 'meta.llama-4-maverick-17b-128e-instruct-fp8', name: 'Meta Llama 4 Maverick 17B', vendor: 'meta', capabilities: ['chat'] },
+  { id: 'meta.llama-4-scout-17b-16e-instruct', name: 'Meta Llama 4 Scout 17B', vendor: 'meta', capabilities: ['chat'] },
+  { id: 'meta.llama-3.3-70b-instruct', name: 'Meta Llama 3.3 70B', vendor: 'meta', capabilities: ['chat'] },
+  { id: 'meta.llama-3.2-90b-vision-instruct', name: 'Meta Llama 3.2 90B Vision', vendor: 'meta', capabilities: ['chat', 'vision'] },
+  { id: 'meta.llama-3.2-11b-vision-instruct', name: 'Meta Llama 3.2 11B Vision', vendor: 'meta', capabilities: ['chat', 'vision'] },
+  { id: 'meta.llama-3.1-405b-instruct', name: 'Meta Llama 3.1 405B', vendor: 'meta', capabilities: ['chat'] },
+
+  // xAI models (US regions only)
+  { id: 'xai.grok-4.1-fast', name: 'xAI Grok 4.1 Fast', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-4-fast', name: 'xAI Grok 4 Fast', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-4', name: 'xAI Grok 4', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-3', name: 'xAI Grok 3', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-3-mini', name: 'xAI Grok 3 Mini', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-3-fast', name: 'xAI Grok 3 Fast', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-code-fast-1', name: 'xAI Grok Code Fast', vendor: 'xai', capabilities: ['chat', 'code'] },
+
+  // OpenAI models
+  { id: 'openai.gpt-oss-120b', name: 'OpenAI GPT OSS 120B', vendor: 'openai', capabilities: ['chat'] },
+  { id: 'openai.gpt-oss-20b', name: 'OpenAI GPT OSS 20B', vendor: 'openai', capabilities: ['chat'] },
 ];
 
 async function main() {
@@ -51,8 +90,8 @@ async function main() {
   config.servingMode = await selectServingMode();
 
   if (config.servingMode === 'on-demand') {
-    // Step 5a: Select model for on-demand
-    config.modelId = await selectModel(config.region);
+    // Step 5a: Discover and select model for on-demand
+    config.modelId = await discoverAndSelectModel(config as SetupConfig);
   } else {
     // Step 5b: Select endpoint for dedicated
     const endpoint = await selectDedicatedEndpoint(config as SetupConfig);
@@ -135,8 +174,8 @@ async function getCompartmentId(): Promise<string> {
   return input({
     message: 'Enter compartment OCID:',
     validate: (value) => {
-      if (!value.startsWith('ocid1.compartment.')) {
-        return 'Invalid compartment OCID. Must start with ocid1.compartment.';
+      if (!value.startsWith('ocid1.compartment.') && !value.startsWith('ocid1.tenancy.')) {
+        return 'Invalid OCID. Must start with ocid1.compartment. or ocid1.tenancy.';
       }
       return true;
     },
@@ -161,22 +200,148 @@ async function selectServingMode(): Promise<'on-demand' | 'dedicated'> {
   });
 }
 
-async function selectModel(region: string): Promise<string> {
-  const isXAIRegion = supportsXAI(region);
-  const availableModels = POPULAR_MODELS.filter(m => {
-    if (m.value.startsWith('xai.') && !isXAIRegion) {
-      return false;
-    }
-    return true;
+/**
+ * Probe the OCI GenAI API to discover which models are actually available
+ */
+async function discoverAvailableModels(config: SetupConfig): Promise<ModelInfo[]> {
+  console.log(chalk.gray('\n🔍 Discovering available models in your region...'));
+
+  const provider = new common.ConfigFileAuthenticationDetailsProvider(
+    undefined,
+    config.profile
+  );
+
+  const client = new inference.GenerativeAiInferenceClient({
+    authenticationDetailsProvider: provider,
   });
+
+  if (config.region) {
+    client.region = common.Region.fromRegionId(config.region);
+  }
+
+  const availableModels: ModelInfo[] = [];
+  const checkPromises: Promise<void>[] = [];
+
+  // Check models in parallel with concurrency limit
+  const concurrencyLimit = 5;
+  let activeChecks = 0;
+
+  for (const model of KNOWN_MODELS) {
+    const checkModel = async () => {
+      try {
+        // Send a minimal request to see if the model exists
+        await client.chat({
+          chatDetails: {
+            compartmentId: config.compartmentId,
+            servingMode: {
+              servingType: 'ON_DEMAND',
+              modelId: model.id,
+            },
+            chatRequest: {
+              apiFormat: 'GENERIC',
+              messages: [
+                {
+                  role: 'USER',
+                  content: [{ type: 'TEXT', text: 'hi' } as inference.models.TextContent],
+                },
+              ],
+              maxTokens: 1,
+            } as inference.models.GenericChatRequest,
+          },
+        });
+
+        // If we get here, model is available
+        availableModels.push(model);
+        process.stdout.write(chalk.green('✓'));
+      } catch (error: any) {
+        const message = error.message || '';
+        // Model not found errors
+        if (message.includes('not found') || message.includes('Entity with key')) {
+          process.stdout.write(chalk.gray('·'));
+        } else {
+          // Other errors might still mean the model exists but something else failed
+          // For now, mark as unavailable
+          process.stdout.write(chalk.yellow('?'));
+        }
+      }
+    };
+
+    checkPromises.push(checkModel());
+
+    // Rate limit
+    if (checkPromises.length >= concurrencyLimit) {
+      await Promise.all(checkPromises);
+      checkPromises.length = 0;
+    }
+  }
+
+  // Wait for remaining checks
+  if (checkPromises.length > 0) {
+    await Promise.all(checkPromises);
+  }
+
+  console.log('\n');
+
+  return availableModels;
+}
+
+/**
+ * Discover available models and let user select one
+ */
+async function discoverAndSelectModel(config: SetupConfig): Promise<string> {
+  const availableModels = await discoverAvailableModels(config);
+
+  if (availableModels.length === 0) {
+    console.log(chalk.yellow('No foundation models found in this region.'));
+    console.log(chalk.gray('You may need to check your region or use a custom model ID.\n'));
+
+    return input({
+      message: 'Enter model ID manually:',
+      validate: (value) => {
+        if (!value.includes('.')) {
+          return 'Model ID should be in format: provider.model-name';
+        }
+        return true;
+      },
+    });
+  }
+
+  console.log(chalk.green(`Found ${availableModels.length} available model(s)\n`));
+
+  // Group by vendor
+  const byVendor = availableModels.reduce((acc, m) => {
+    if (!acc[m.vendor]) acc[m.vendor] = [];
+    acc[m.vendor].push(m);
+    return acc;
+  }, {} as Record<string, ModelInfo[]>);
+
+  // Build choices grouped by vendor
+  const choices: { value: string; name: string }[] = [];
+
+  for (const [vendor, models] of Object.entries(byVendor)) {
+    const vendorName = vendor.charAt(0).toUpperCase() + vendor.slice(1);
+    choices.push({ value: `header-${vendor}`, name: chalk.bold.blue(`── ${vendorName} ──`) });
+    for (const model of models) {
+      const caps = model.capabilities.join(', ');
+      choices.push({
+        value: model.id,
+        name: `  ${model.name} ${chalk.gray(`[${caps}]`)}`,
+      });
+    }
+  }
+
+  choices.push({ value: 'custom', name: chalk.gray('Enter custom model ID...') });
 
   const modelChoice = await select({
     message: 'Select model:',
-    choices: [
-      ...availableModels.map(m => ({ value: m.value, name: m.name })),
-      { value: 'custom', name: 'Enter custom model ID...' },
-    ],
+    choices,
+    pageSize: 20,
   });
+
+  // Skip header selections
+  if (modelChoice.startsWith('header-')) {
+    return discoverAndSelectModel(config);
+  }
 
   if (modelChoice === 'custom') {
     return input({
@@ -272,8 +437,7 @@ async function testConfiguration(config: SetupConfig): Promise<boolean> {
       config.profile
     );
 
-    // Just verify we can create the client and region is valid
-    const client = new genai.GenerativeAiClient({
+    const client = new inference.GenerativeAiInferenceClient({
       authenticationDetailsProvider: provider,
     });
 
@@ -281,13 +445,32 @@ async function testConfiguration(config: SetupConfig): Promise<boolean> {
       client.region = common.Region.fromRegionId(config.region);
     }
 
-    // Verify compartment exists by listing models (lightweight call)
-    await client.listModels({
-      compartmentId: config.compartmentId,
-      limit: 1,
+    // Test with actual model
+    const modelId = config.servingMode === 'on-demand' ? config.modelId! : undefined;
+    const endpointId = config.servingMode === 'dedicated' ? config.endpointId : undefined;
+
+    const servingMode = endpointId
+      ? { servingType: 'DEDICATED' as const, endpointId }
+      : { servingType: 'ON_DEMAND' as const, modelId: modelId! };
+
+    await client.chat({
+      chatDetails: {
+        compartmentId: config.compartmentId,
+        servingMode,
+        chatRequest: {
+          apiFormat: 'GENERIC',
+          messages: [
+            {
+              role: 'USER',
+              content: [{ type: 'TEXT', text: 'Say "test successful" in 3 words or less.' } as inference.models.TextContent],
+            },
+          ],
+          maxTokens: 10,
+        } as inference.models.GenericChatRequest,
+      },
     });
 
-    console.log(chalk.green('✓ Configuration valid'));
+    console.log(chalk.green('✓ Configuration valid - model responded successfully'));
     return true;
   } catch (error: any) {
     console.log(chalk.red('✗ Configuration test failed:'), error.message || error);
@@ -308,14 +491,15 @@ ${config.servingMode === 'dedicated' && config.endpointId ? `OCI_GENAI_ENDPOINT_
   fs.writeFileSync(envPath, envContent);
   console.log(chalk.gray(`Saved: ${envPath}`));
 
-  // Generate opencode.json snippet
+  // Get model info for display name
+  const modelInfo = KNOWN_MODELS.find(m => m.id === config.modelId);
+  const modelName = config.servingMode === 'on-demand'
+    ? modelInfo?.name || config.modelId!
+    : config.customModelName || 'Custom Endpoint';
+
   const modelKey = config.servingMode === 'on-demand'
     ? config.modelId!
     : config.customModelName || 'custom-endpoint';
-
-  const modelName = config.servingMode === 'on-demand'
-    ? POPULAR_MODELS.find(m => m.value === config.modelId)?.name || config.modelId!
-    : config.customModelName || 'Custom Endpoint';
 
   const opencodeConfig = {
     provider: {
