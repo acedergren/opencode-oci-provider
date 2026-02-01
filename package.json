@@ -30,7 +30,7 @@
     "setup",
     "wizard"
   ],
-  "author": "",
+  "author": "Alexander Cedergren <alex@solutionsedge.io>",
   "license": "MIT",
   "dependencies": {
     "@inquirer/prompts": "^7.5.1",
