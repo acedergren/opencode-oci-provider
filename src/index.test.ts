@@ -1,0 +1,407 @@
+/**
+ * Regression tests for OCI GenAI Provider
+ *
+ * These tests verify fixes for model-specific compatibility issues:
+ * 1. Tool format: Flat structure (no nested `function` wrapper)
+ * 2. JSON Schema: Strip $schema, ref, $ref for Gemini compatibility
+ * 3. Model parameters: xAI models don't support frequencyPenalty/presencePenalty
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createOCI, OCIProvider } from './index.js';
+
+// Mock OCI SDK to avoid actual API calls
+vi.mock('oci-generativeaiinference', () => {
+  return {
+    GenerativeAiInferenceClient: class MockClient {
+      region: any = null;
+      async chat() {
+        return {
+          chatResult: {
+            chatResponse: {
+              choices: [{
+                message: { content: [{ type: 'TEXT', text: 'test response' }] },
+                finishReason: 'COMPLETE',
+              }],
+              usage: { promptTokens: 10, completionTokens: 20 },
+            },
+          },
+        };
+      }
+    },
+    models: {
+      GenericChatRequest: { apiFormat: 'GENERIC' },
+      CohereChatRequest: { apiFormat: 'COHERE' },
+      TextContent: { type: 'TEXT' },
+    },
+  };
+});
+
+vi.mock('oci-common', () => {
+  return {
+    ConfigFileAuthenticationDetailsProvider: class MockAuthProvider {},
+    Region: {
+      fromRegionId: () => ({ regionId: 'us-chicago-1' }),
+    },
+  };
+});
+
+describe('OCI Provider Tool Compatibility', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  describe('cleanJsonSchema', () => {
+    it('should strip $schema from top level', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      const schema = {
+        $schema: 'http://json-schema.org/draft-07/schema#',
+        type: 'object',
+        properties: { name: { type: 'string' } },
+      };
+
+      const cleaned = cleanJsonSchema(schema);
+      expect(cleaned).not.toHaveProperty('$schema');
+      expect(cleaned.type).toBe('object');
+      expect(cleaned.properties.name.type).toBe('string');
+    });
+
+    it('should strip ref and $ref from nested properties', () => {
+      const model = provider.languageModel('google.gemini-2.5-pro');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      const schema = {
+        type: 'object',
+        properties: {
+          answers: {
+            type: 'array',
+            items: {
+              ref: 'QuestionOption',
+              $ref: '#/definitions/QuestionOption',
+              type: 'object',
+            },
+          },
+        },
+      };
+
+      const cleaned = cleanJsonSchema(schema);
+      expect(cleaned.properties.answers.items).not.toHaveProperty('ref');
+      expect(cleaned.properties.answers.items).not.toHaveProperty('$ref');
+      expect(cleaned.properties.answers.items.type).toBe('object');
+    });
+
+    it('should recursively clean deeply nested schemas', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      const schema = {
+        type: 'object',
+        properties: {
+          level1: {
+            type: 'object',
+            $schema: 'should-be-removed',
+            properties: {
+              level2: {
+                type: 'object',
+                ref: 'SomeRef',
+                properties: {
+                  level3: {
+                    $ref: '#/deep/ref',
+                    type: 'string',
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+
+      const cleaned = cleanJsonSchema(schema);
+      expect(cleaned.properties.level1).not.toHaveProperty('$schema');
+      expect(cleaned.properties.level1.properties.level2).not.toHaveProperty('ref');
+      expect(cleaned.properties.level1.properties.level2.properties.level3).not.toHaveProperty('$ref');
+    });
+
+    it('should handle arrays with objects containing forbidden properties', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      const schema = {
+        type: 'array',
+        items: [
+          { type: 'string', $schema: 'remove-me' },
+          { type: 'number', ref: 'remove-me-too' },
+        ],
+      };
+
+      const cleaned = cleanJsonSchema(schema);
+      expect(cleaned.items[0]).not.toHaveProperty('$schema');
+      expect(cleaned.items[1]).not.toHaveProperty('ref');
+      expect(cleaned.items[0].type).toBe('string');
+      expect(cleaned.items[1].type).toBe('number');
+    });
+
+    it('should handle null and primitive values gracefully', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      expect(cleanJsonSchema(null)).toBe(null);
+      expect(cleanJsonSchema(undefined)).toBe(undefined);
+      expect(cleanJsonSchema('string')).toBe('string');
+      expect(cleanJsonSchema(123)).toBe(123);
+      expect(cleanJsonSchema(true)).toBe(true);
+    });
+  });
+
+  describe('convertTools', () => {
+    it('should use flat structure without nested function wrapper', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const convertTools = (model as any).convertTools.bind(model);
+
+      const tools = [
+        {
+          type: 'function' as const,
+          name: 'get_weather',
+          description: 'Get the weather for a location',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              location: { type: 'string' },
+            },
+          },
+        },
+      ];
+
+      const converted = convertTools(tools);
+
+      expect(converted).toHaveLength(1);
+      expect(converted[0]).toEqual({
+        type: 'FUNCTION',
+        name: 'get_weather',
+        description: 'Get the weather for a location',
+        parameters: {
+          type: 'object',
+          properties: {
+            location: { type: 'string' },
+          },
+        },
+      });
+
+      // Verify NO nested function wrapper (this was the bug)
+      expect(converted[0]).not.toHaveProperty('function');
+    });
+
+    it('should clean JSON schema in tool parameters', () => {
+      const model = provider.languageModel('google.gemini-2.5-pro');
+      const convertTools = (model as any).convertTools.bind(model);
+
+      const tools = [
+        {
+          type: 'function' as const,
+          name: 'ask_question',
+          description: 'Ask a question',
+          inputSchema: {
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'object',
+            properties: {
+              options: {
+                type: 'array',
+                items: {
+                  ref: 'QuestionOption',
+                },
+              },
+            },
+          },
+        },
+      ];
+
+      const converted = convertTools(tools);
+
+      // Schema should be cleaned
+      expect(converted[0].parameters).not.toHaveProperty('$schema');
+      expect(converted[0].parameters.properties.options.items).not.toHaveProperty('ref');
+    });
+
+    it('should return undefined for empty or null tools', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const convertTools = (model as any).convertTools.bind(model);
+
+      expect(convertTools(undefined)).toBeUndefined();
+      expect(convertTools(null)).toBeUndefined();
+      expect(convertTools([])).toBeUndefined();
+    });
+
+    it('should filter out non-function tools', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const convertTools = (model as any).convertTools.bind(model);
+
+      const tools = [
+        { type: 'function' as const, name: 'valid', description: 'Valid', inputSchema: {} },
+        { type: 'other' as any, name: 'invalid' },
+      ];
+
+      const converted = convertTools(tools);
+
+      expect(converted).toHaveLength(1);
+      expect(converted[0].name).toBe('valid');
+    });
+  });
+
+  describe('SWE Presets and Model Parameters', () => {
+    it('should set supportsPenalties=false for xAI models', () => {
+      const model = provider.languageModel('xai.grok-4');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsPenalties).toBe(false);
+      expect(swePreset.supportsTools).toBe(true);
+    });
+
+    it('should set supportsPenalties=true for Google models', () => {
+      const model = provider.languageModel('google.gemini-2.5-pro');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsPenalties).toBe(true);
+      expect(swePreset.supportsTools).toBe(true);
+    });
+
+    it('should set supportsPenalties=true for Cohere models', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsPenalties).toBe(true);
+      expect(swePreset.supportsTools).toBe(true);
+    });
+
+    it('should set supportsPenalties=true for Meta models', () => {
+      const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsPenalties).toBe(true);
+      expect(swePreset.supportsTools).toBe(true);
+    });
+  });
+
+  describe('buildGenericChatRequest', () => {
+    it('should exclude penalty parameters for xAI models', () => {
+      const model = provider.languageModel('xai.grok-4');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        frequencyPenalty: 0.5, // Should be ignored for xAI
+        presencePenalty: 0.5,  // Should be ignored for xAI
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      expect(request).not.toHaveProperty('frequencyPenalty');
+      expect(request).not.toHaveProperty('presencePenalty');
+      expect(request.temperature).toBeDefined();
+      expect(request.topP).toBeDefined();
+    });
+
+    it('should include penalty parameters for Google models', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        frequencyPenalty: 0.5,
+        presencePenalty: 0.3,
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      expect(request.frequencyPenalty).toBe(0.5);
+      expect(request.presencePenalty).toBe(0.3);
+    });
+
+    it('should use SWE preset defaults when penalties not specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-pro');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        // No penalties specified
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      // Should use defaults from google preset (0)
+      expect(request.frequencyPenalty).toBe(0);
+      expect(request.presencePenalty).toBe(0);
+    });
+  });
+
+  describe('Model Family Detection', () => {
+    it('should detect cohere model family', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      expect((model as any).modelFamily).toBe('cohere');
+    });
+
+    it('should use generic family for Google models', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      expect((model as any).modelFamily).toBe('generic');
+    });
+
+    it('should use generic family for xAI models', () => {
+      const model = provider.languageModel('xai.grok-4');
+      expect((model as any).modelFamily).toBe('generic');
+    });
+
+    it('should use generic family for Meta models', () => {
+      const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+      expect((model as any).modelFamily).toBe('generic');
+    });
+  });
+});
+
+describe('Provider Instantiation', () => {
+  it('should create provider with settings', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+      configProfile: 'CUSTOM',
+    });
+
+    expect(provider).toBeInstanceOf(OCIProvider);
+    expect(provider.getSettings().compartmentId).toBe('test-compartment');
+    expect(provider.getSettings().region).toBe('us-chicago-1');
+    expect(provider.getSettings().configProfile).toBe('CUSTOM');
+  });
+
+  it('should throw error when creating language model without compartmentId', () => {
+    // Clear env var if set
+    const originalEnv = process.env.OCI_COMPARTMENT_ID;
+    delete process.env.OCI_COMPARTMENT_ID;
+
+    const provider = createOCI({});
+
+    expect(() => provider.languageModel('google.gemini-2.5-flash'))
+      .toThrow('Missing compartment ID');
+
+    // Restore env
+    if (originalEnv) process.env.OCI_COMPARTMENT_ID = originalEnv;
+  });
+
+  it('should not support text embedding models', () => {
+    const provider = createOCI({ compartmentId: 'test' });
+    expect(() => provider.textEmbeddingModel('any'))
+      .toThrow('Text embedding models are not supported');
+  });
+
+  it('should not support image models', () => {
+    const provider = createOCI({ compartmentId: 'test' });
+    expect(() => provider.imageModel('any'))
+      .toThrow('Image models are not supported');
+  });
+});
