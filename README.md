@@ -114,6 +114,14 @@ Verify your OCI CLI is configured: `oci iam region list`
 
 xAI models are only available in US regions. Use Cohere, Google, or Meta models in other regions.
 
-## License
+## Legal
 
-MIT
+**Independent Project** — This is a community project with no affiliation to Oracle Corporation or the OpenCode team. "OCI" and "Oracle Cloud Infrastructure" refer to compatibility with Oracle's services, not endorsement by Oracle. "OpenCode" refers to compatibility with the OpenCode CLI tool.
+
+**License** — MIT
+
+**Disclaimer** — This software is provided "as is" without warranty. The authors and Oracle Corporation bear no liability for damages arising from its use. You are responsible for compliance with all applicable laws and Oracle's terms of service.
+
+---
+
+**Created by** [Alexander Cedergren](https://github.com/acedergren)
