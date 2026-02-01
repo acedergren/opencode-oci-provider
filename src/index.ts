@@ -38,6 +38,7 @@ interface SWEPreset {
   frequencyPenalty: number;
   presencePenalty: number;
   supportsTools: boolean;
+  supportsPenalties: boolean;
 }
 
 const SWE_PRESETS: Record<string, SWEPreset> = {
@@ -48,6 +49,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     frequencyPenalty: 0,
     presencePenalty: 0,
     supportsTools: true,
+    supportsPenalties: true,
   },
   // Google Gemini - excellent for code
   'google': {
@@ -56,14 +58,16 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     frequencyPenalty: 0,
     presencePenalty: 0,
     supportsTools: true,
+    supportsPenalties: true,
   },
-  // xAI Grok - optimized for code
+  // xAI Grok - does NOT support frequencyPenalty/presencePenalty
   'xai': {
     temperature: 0.1,
     topP: 0.9,
     frequencyPenalty: 0,
     presencePenalty: 0,
     supportsTools: true,
+    supportsPenalties: false,
   },
   // Meta Llama - balanced for code
   'meta': {
@@ -72,6 +76,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     frequencyPenalty: 0,
     presencePenalty: 0,
     supportsTools: true,
+    supportsPenalties: true,
   },
   // Default fallback
   'default': {
@@ -80,6 +85,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     frequencyPenalty: 0,
     presencePenalty: 0,
     supportsTools: true,
+    supportsPenalties: true,
   },
 };
 
@@ -338,6 +344,11 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           let completionTokens = 0;
           const toolCalls: LanguageModelV2ToolCall[] = [];
 
+          // Debug: log the full response structure
+          if (process.env.OCI_DEBUG) {
+            console.error('[OCI Debug] Chat Result:', JSON.stringify(chatResult, null, 2));
+          }
+
           if (modelFamily === 'cohere') {
             const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
             text = cohereResponse?.text || '';
@@ -497,17 +508,24 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       ? this.convertTools(options.tools)
       : undefined;
 
-    return {
+    // Base request
+    const request: any = {
       apiFormat: oci.models.GenericChatRequest.apiFormat,
       messages,
       maxTokens: options.maxOutputTokens,
       temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
       topP: this.applyDefaults(options.topP, this.swePreset.topP),
-      frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
-      presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
       stop: options.stopSequences,
       ...(tools && { tools }),
     };
+
+    // Only include penalty parameters for models that support them (e.g., not xAI/Grok)
+    if (this.swePreset.supportsPenalties) {
+      request.frequencyPenalty = this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty);
+      request.presencePenalty = this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty);
+    }
+
+    return request;
   }
 
   /**
@@ -532,12 +550,36 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       .filter((tool): tool is LanguageModelV2FunctionTool => tool.type === 'function')
       .map(tool => ({
         type: 'FUNCTION',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.inputSchema,
-        },
+        name: tool.name,
+        description: tool.description,
+        parameters: this.cleanJsonSchema(tool.inputSchema),
       }));
+  }
+
+  /**
+   * Clean JSON Schema for compatibility with Google Gemini via OCI.
+   * Removes $schema, ref, and other unsupported properties.
+   */
+  private cleanJsonSchema(schema: any): any {
+    if (!schema || typeof schema !== 'object') return schema;
+
+    const cleaned: any = {};
+    for (const [key, value] of Object.entries(schema)) {
+      // Skip properties Gemini doesn't support
+      if (key === '$schema' || key === 'ref' || key === '$ref') continue;
+
+      // Recursively clean nested objects
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        cleaned[key] = this.cleanJsonSchema(value);
+      } else if (Array.isArray(value)) {
+        cleaned[key] = value.map(item =>
+          item && typeof item === 'object' ? this.cleanJsonSchema(item) : item
+        );
+      } else {
+        cleaned[key] = value;
+      }
+    }
+    return cleaned;
   }
 
   /**
