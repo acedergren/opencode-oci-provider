@@ -597,6 +597,202 @@ describe('Tool Result Message Conversion', () => {
   });
 });
 
+describe('SDK Serialization Compatibility', () => {
+  it('should preserve isForceSingleStep through SDK getJsonObj serialization', async () => {
+    // Import the real SDK serialization functions (not mocked)
+    const ociModels = await import('oci-generativeaiinference/lib/model/index.js');
+
+    // Create a Cohere request object with isForceSingleStep
+    const cohereRequest = {
+      apiFormat: 'COHERE',
+      message: 'What is the current directory?',
+      chatHistory: [
+        { role: 'CHATBOT', message: 'Let me check', toolCalls: [{ name: 'bash', parameters: { command: 'pwd' } }] }
+      ],
+      maxTokens: 1000,
+      temperature: 0.2,
+      tools: [{ name: 'bash', description: 'Run bash', parameterDefinitions: {} }],
+      toolResults: [
+        { call: { name: 'bash', parameters: { command: 'pwd' } }, outputs: [{ result: '/Users/test' }] }
+      ],
+      isForceSingleStep: true,
+    };
+
+    // Serialize using the SDK's getJsonObj function
+    const serialized = ociModels.BaseChatRequest.getJsonObj(cohereRequest);
+
+    // Verify isForceSingleStep is preserved after SDK serialization
+    expect(serialized.isForceSingleStep).toBe(true);
+    expect(serialized.toolResults).toBeDefined();
+    expect(serialized.apiFormat).toBe('COHERE');
+  });
+
+  it('should preserve isForceSingleStep through full ChatDetails serialization', async () => {
+    // Import the real SDK serialization functions
+    const ociModels = await import('oci-generativeaiinference/lib/model/index.js');
+
+    // Create full ChatDetails object as it would be sent to the API
+    const chatDetails = {
+      compartmentId: 'test-compartment',
+      servingMode: { servingType: 'ON_DEMAND', modelId: 'cohere.command-a-03-2025' },
+      chatRequest: {
+        apiFormat: 'COHERE',
+        message: 'Process the result',
+        chatHistory: [],
+        toolResults: [
+          { call: { name: 'bash', parameters: {} }, outputs: [{ result: 'test output' }] }
+        ],
+        isForceSingleStep: true,
+      },
+    };
+
+    // Serialize using ChatDetails.getJsonObj (what the SDK client uses)
+    const serialized = ociModels.ChatDetails.getJsonObj(chatDetails);
+
+    // Verify the nested chatRequest still has isForceSingleStep
+    expect(serialized.chatRequest.isForceSingleStep).toBe(true);
+    expect(serialized.chatRequest.toolResults).toBeDefined();
+  });
+});
+
+describe('Generic Format Tool Results Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should convert tool-result messages to TOOL role for Gemini models', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'Run pwd' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            output: { type: 'text' as const, value: '/Users/test/project' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    // Verify we have user, assistant, and tool messages
+    expect(messages).toHaveLength(3);
+    expect(messages[0].role).toBe('USER');
+    expect(messages[1].role).toBe('ASSISTANT');
+    expect(messages[2].role).toBe('TOOL');
+    expect((messages[2] as any).toolCallId).toBe('call_1');
+  });
+
+  it('should convert tool-call in assistant message for Grok models', () => {
+    const model = provider.languageModel('xai.grok-4');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'Let me check.' },
+          { type: 'tool-call' as const, toolCallId: 'call_ls', toolName: 'bash', input: '{"command":"ls"}' }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe('ASSISTANT');
+    // Should have both text and tool call content
+    const assistantContent = messages[1].content as any[];
+    expect(assistantContent.length).toBe(2);
+    expect(assistantContent[0].type).toBe('TEXT');
+    expect(assistantContent[1].type).toBe('TOOL_CALL');
+    expect(assistantContent[1].id).toBe('call_ls');
+    expect(assistantContent[1].name).toBe('bash');
+  });
+
+  it('should handle complete tool flow for Llama models', () => {
+    const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'What is the current directory?' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_pwd', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_pwd',
+            output: { type: 'text' as const, value: '/home/user/project' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(3);
+    // User message
+    expect(messages[0].role).toBe('USER');
+    // Assistant with tool call
+    expect(messages[1].role).toBe('ASSISTANT');
+    expect((messages[1].content as any[])[0].type).toBe('TOOL_CALL');
+    // Tool result
+    expect(messages[2].role).toBe('TOOL');
+    expect(messages[2].content[0].text).toBe('/home/user/project');
+  });
+
+  it('should handle JSON output type in tool results', () => {
+    const model = provider.languageModel('google.gemini-2.5-pro-preview');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_json',
+            output: { type: 'json' as const, value: { files: ['a.ts', 'b.ts'], count: 2 } }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('TOOL');
+    // JSON should be stringified
+    const text = messages[0].content[0].text;
+    expect(text).toContain('files');
+    expect(text).toContain('a.ts');
+    expect(JSON.parse(text)).toEqual({ files: ['a.ts', 'b.ts'], count: 2 });
+  });
+});
+
 describe('Provider Instantiation', () => {
   it('should create provider with settings', () => {
     const provider = createOCI({

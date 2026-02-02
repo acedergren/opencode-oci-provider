@@ -560,7 +560,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     // Cohere requires isForceSingleStep=true when both message and toolResults are present
     const hasToolResults = toolResults && toolResults.length > 0;
 
-    return {
+    const request: any = {
       apiFormat: oci.models.CohereChatRequest.apiFormat,
       message,
       chatHistory,
@@ -570,8 +570,11 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
       presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
       ...(tools && { tools }),
+      // Cohere SDK requires isForceSingleStep=true when both message and toolResults are present
       ...(hasToolResults && { toolResults, isForceSingleStep: true }),
-    } as any;
+    };
+
+    return request;
   }
 
   private buildGenericChatRequest(options: LanguageModelV2CallOptions): oci.models.GenericChatRequest {
