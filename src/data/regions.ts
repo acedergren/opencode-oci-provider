@@ -116,10 +116,15 @@ export const REGIONS: Record<string, RegionInfo> = {
 
 /**
  * Models that require dedicated AI clusters (not available on-demand)
+ * Source: https://docs.oracle.com/en-us/iaas/Content/generative-ai/pretrained-models.htm
+ * Last updated: 2026-02-02
  */
 export const DEDICATED_ONLY_MODELS = [
-  'cohere.command-a-reasoning-08-2025',
-  'cohere.command-a-vision-07-2025',
+  // Meta Llama 4 models (dedicated only)
+  'meta.llama-4-maverick',
+  'meta.llama-4-scout',
+  // Meta Llama 3.2 11B Vision (dedicated only)
+  'meta.llama-3.2-11b-vision',
 ];
 
 /**
@@ -162,4 +167,40 @@ export function getAllRegionIds(): string[] {
     const bInfo = REGIONS[b];
     return aInfo.name.localeCompare(bInfo.name);
   });
+}
+
+/**
+ * Check if a model requires a dedicated AI cluster
+ */
+export function isDedicatedOnly(modelId: string): boolean {
+  return DEDICATED_ONLY_MODELS.includes(modelId);
+}
+
+/**
+ * Get user-friendly model name for error messages
+ */
+export function getModelDisplayName(modelId: string): string {
+  const parts = modelId.split('.');
+  if (parts.length < 2) return modelId;
+
+  const provider = parts[0];
+  const model = parts.slice(1).join('.');
+
+  // Format provider name
+  const providerNames: Record<string, string> = {
+    'meta': 'Meta',
+    'cohere': 'Cohere',
+    'google': 'Google',
+    'xai': 'xAI',
+  };
+
+  const providerName = providerNames[provider] || provider;
+
+  // Format model name
+  const modelName = model
+    .split('-')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+
+  return `${providerName} ${modelName}`;
 }

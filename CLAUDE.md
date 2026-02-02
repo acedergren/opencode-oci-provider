@@ -27,6 +27,10 @@ npm run test            # Run tests
 - **Build Tool:** tsup (bundles to CJS + ESM)
 - **Package Manager:** npm
 - **License:** MIT
+- **AI SDK Compatibility:** This provider is compatible with AI SDK v5.x (OpenCode uses v5.0.124)
+  - **Important:** When testing, use `ai@5.x` NOT `ai@6.x` - version 6 has breaking changes
+  - Provider interface: `@ai-sdk/provider@2.0.1` (LanguageModelV2 interface)
+  - Peer dependency: `@ai-sdk/provider@>=1.0.0 <3.0.0` (allows v1.x and v2.x)
 
 ## Detailed Guidelines
 

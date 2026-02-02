@@ -21,6 +21,7 @@ import type {
 } from '@ai-sdk/provider';
 import * as oci from 'oci-generativeaiinference';
 import * as common from 'oci-common';
+import { isDedicatedOnly, getModelDisplayName } from './data/regions.js';
 
 export interface OCIProviderSettings {
   compartmentId?: string;
@@ -1089,6 +1090,15 @@ export class OCIProvider implements ProviderV2 {
         'Missing compartment ID. Set OCI_COMPARTMENT_ID env var or pass compartmentId in options.'
       );
     }
+
+    // Check if model requires dedicated cluster when using on-demand mode
+    if (this.settings.servingMode === 'on-demand' && isDedicatedOnly(modelId)) {
+      throw new Error(
+        `${getModelDisplayName(modelId)} (${modelId}) requires a dedicated AI cluster and is not available in on-demand mode. ` +
+        `To use this model, deploy it to a dedicated endpoint and configure the provider with servingMode: 'dedicated' and your endpointId.`
+      );
+    }
+
     return new OCIChatLanguageModelV2(modelId, this.settings, false);
   }
 
