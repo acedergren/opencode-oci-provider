@@ -914,6 +914,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       return [];
     }
 
+    // Check if this is an xAI model - they need special tool history handling
+    const isXAI = this.modelId.startsWith('xai.');
+
     const messages: oci.models.Message[] = [];
 
     for (const message of prompt) {
@@ -961,6 +964,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         } as oci.models.UserMessage);
       } else if (role === 'assistant') {
         const content: oci.models.ChatContent[] = [];
+        const toolCallTexts: string[] = [];
 
         for (const part of message.content) {
           if (part.type === 'text') {
@@ -970,13 +974,34 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             };
             content.push(textContent);
           } else if (part.type === 'tool-call') {
-            // Handle tool calls in assistant messages
-            content.push({
-              type: 'TOOL_CALL',
-              id: part.toolCallId,
-              name: part.toolName,
-              arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input),
-            } as any);
+            if (isXAI) {
+              // For xAI/Grok: Convert tool calls to text representation
+              // Grok rejects TOOL_CALL content type in message history
+              const args = typeof part.input === 'string' ? part.input : JSON.stringify(part.input);
+              toolCallTexts.push(`[Called tool "${part.toolName}" with: ${args}]`);
+            } else {
+              // Handle tool calls in assistant messages (standard format)
+              content.push({
+                type: 'TOOL_CALL',
+                id: part.toolCallId,
+                name: part.toolName,
+                arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input),
+              } as any);
+            }
+          }
+        }
+
+        // For xAI: append tool call descriptions as text
+        if (isXAI && toolCallTexts.length > 0) {
+          const toolCallText = toolCallTexts.join('\n');
+          // Add as text content or append to existing text
+          if (content.length > 0 && content[0].type === oci.models.TextContent.type) {
+            (content[0] as oci.models.TextContent).text += '\n' + toolCallText;
+          } else {
+            content.unshift({
+              type: oci.models.TextContent.type,
+              text: toolCallText,
+            } as oci.models.TextContent);
           }
         }
 
@@ -1006,15 +1031,29 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               // Fallback for unknown output types
               resultText = typeof output === 'object' ? JSON.stringify(output) : String(output);
             }
-            const textContent: oci.models.TextContent = {
-              type: oci.models.TextContent.type,
-              text: resultText,
-            };
-            messages.push({
-              role: 'TOOL',
-              content: [textContent],
-              toolCallId: part.toolCallId,
-            } as any);
+
+            if (isXAI) {
+              // For xAI/Grok: Convert tool results to USER messages
+              // Grok rejects TOOL role messages
+              const toolName = (part as any).toolName || 'tool';
+              messages.push({
+                role: 'USER',
+                content: [{
+                  type: oci.models.TextContent.type,
+                  text: `[Tool result from "${toolName}": ${resultText}]`,
+                } as oci.models.TextContent],
+              } as oci.models.UserMessage);
+            } else {
+              const textContent: oci.models.TextContent = {
+                type: oci.models.TextContent.type,
+                text: resultText,
+              };
+              messages.push({
+                role: 'TOOL',
+                content: [textContent],
+                toolCallId: part.toolCallId,
+              } as any);
+            }
           }
         }
       }
