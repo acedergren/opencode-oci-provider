@@ -106,7 +106,14 @@ function getModelProvider(modelId: string): string {
 
 function getSWEPreset(modelId: string): SWEPreset {
   const provider = getModelProvider(modelId);
-  return SWE_PRESETS[provider] || SWE_PRESETS['default'];
+  const basePreset = SWE_PRESETS[provider] || SWE_PRESETS['default'];
+
+  // Gemini Flash-Lite has thinking disabled for speed/cost optimization
+  if (modelId.includes('flash-lite')) {
+    return { ...basePreset, supportsReasoning: false };
+  }
+
+  return basePreset;
 }
 
 type ModelFamily = 'cohere' | 'generic';

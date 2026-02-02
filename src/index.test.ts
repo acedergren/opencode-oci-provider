@@ -855,12 +855,28 @@ describe('Reasoning Support', () => {
       expect(swePreset.supportsReasoning).toBe(true);
     });
 
-    it('should set supportsReasoning=true for Google Gemini models', () => {
+    it('should set supportsReasoning=true for Google Gemini Pro models', () => {
       const model = provider.languageModel('google.gemini-2.5-pro');
       const swePreset = (model as any).swePreset;
 
       // Gemini 2.5 Pro has thinking enabled by default (cannot be turned off)
       expect(swePreset.supportsReasoning).toBe(true);
+    });
+
+    it('should set supportsReasoning=true for Google Gemini Flash models', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const swePreset = (model as any).swePreset;
+
+      // Gemini 2.5 Flash has thinking enabled by default
+      expect(swePreset.supportsReasoning).toBe(true);
+    });
+
+    it('should set supportsReasoning=false for Google Gemini Flash-Lite models', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash-lite');
+      const swePreset = (model as any).swePreset;
+
+      // Flash-Lite has thinking disabled for speed/cost optimization
+      expect(swePreset.supportsReasoning).toBe(false);
     });
 
     it('should set supportsReasoning=false for non-reasoning models', () => {
