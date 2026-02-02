@@ -13,6 +13,13 @@
           "name": "Cohere Command A",
           "limit": { "context": 128000, "output": 4000 }
         },
+        "cohere.command-a-reasoning-08-2025": {
+          "name": "Cohere Command A Reasoning",
+          "limit": { "context": 128000, "output": 4000 },
+          "options": {
+            "thinkingBudgetTokens": 8000
+          }
+        },
         "google.gemini-2.5-flash": {
           "name": "Gemini 2.5 Flash",
           "limit": { "context": 1048576, "output": 8192 },
