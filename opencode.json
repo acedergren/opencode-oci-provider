@@ -1,13 +1,32 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "oci-genai": {
+    "oci-genai-us": {
       "npm": "file:///Users/acedergr/Projects/opencode-oci-provider",
-      "name": "Oracle Cloud Infrastructure",
+      "name": "Oracle Cloud Infrastructure (US)",
       "options": {
         "compartmentId": "{env:OCI_COMPARTMENT_ID}",
         "configProfile": "{env:OCI_CONFIG_PROFILE}",
         "region": "us-chicago-1"
+      },
+      "models": {
+        "xai.grok-4-1-fast": {
+          "name": "Grok 4.1 Fast",
+          "limit": { "context": 2000000, "output": 16000 }
+        },
+        "xai.grok-3-fast": {
+          "name": "Grok 3 Fast",
+          "limit": { "context": 131072, "output": 8192 }
+        }
+      }
+    },
+    "oci-genai-eu": {
+      "npm": "file:///Users/acedergr/Projects/opencode-oci-provider",
+      "name": "Oracle Cloud Infrastructure (EU)",
+      "options": {
+        "compartmentId": "{env:OCI_COMPARTMENT_ID}",
+        "configProfile": "{env:OCI_CONFIG_PROFILE}",
+        "region": "eu-frankfurt-1"
       },
       "models": {
         "cohere.command-a-03-2025": {
@@ -41,14 +60,6 @@
         "google.gemini-2.5-pro-preview": {
           "name": "Gemini 2.5 Pro",
           "limit": { "context": 1048576, "output": 8192 }
-        },
-        "xai.grok-4-1-fast": {
-          "name": "Grok 4.1 Fast",
-          "limit": { "context": 2000000, "output": 16000 }
-        },
-        "xai.grok-3-fast": {
-          "name": "Grok 3 Fast",
-          "limit": { "context": 131072, "output": 8192 }
         },
         "meta.llama-3.1-405b-instruct": {
           "name": "Llama 3.1 405B",

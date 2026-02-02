@@ -9,18 +9,16 @@ import { z } from 'zod';
 async function testToolCalling() {
   console.log('🔧 Testing OCI Provider Tool Calling\n');
 
-  const provider = createOCI({
-    compartmentId: process.env.OCI_COMPARTMENT_ID!,
-    region: process.env.OCI_REGION!,
-    servingMode: 'on-demand',
-  });
+  const compartmentId = process.env.OCI_COMPARTMENT_ID!;
 
-  // Test models
+  // Test models with their required regions
+  // xAI models only available in US regions (us-ashburn-1, us-chicago-1, us-phoenix-1)
+  // Other models available in both US and EU regions
   const modelsToTest = [
-    'cohere.command-a-03-2025',
-    'google.gemini-2.5-flash',
-    'xai.grok-4-1-fast',
-    'meta.llama-3.3-70b-instruct',
+    { id: 'cohere.command-a-03-2025', region: 'eu-frankfurt-1' },
+    { id: 'google.gemini-2.5-flash', region: 'eu-frankfurt-1' },
+    { id: 'xai.grok-4-1-fast', region: 'us-ashburn-1' },  // xAI requires US region
+    { id: 'meta.llama-3.3-70b-instruct', region: 'eu-frankfurt-1' },
   ];
 
   // Tool definition using AI SDK v5 format with Zod schema
@@ -38,11 +36,18 @@ async function testToolCalling() {
     },
   };
 
-  for (const modelId of modelsToTest) {
-    console.log(`\n📊 Testing: ${modelId}`);
+  for (const { id: modelId, region } of modelsToTest) {
+    console.log(`\n📊 Testing: ${modelId} (region: ${region})`);
     console.log('='.repeat(60));
 
     try {
+      // Create provider with model-specific region
+      const provider = createOCI({
+        compartmentId,
+        region,
+        servingMode: 'on-demand',
+      });
+
       const model = provider.languageModel(modelId);
 
       const result = await streamText({
