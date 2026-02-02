@@ -6,7 +6,8 @@
       "name": "Oracle Cloud Infrastructure",
       "options": {
         "compartmentId": "{env:OCI_COMPARTMENT_ID}",
-        "configProfile": "{env:OCI_CONFIG_PROFILE}"
+        "configProfile": "{env:OCI_CONFIG_PROFILE}",
+        "region": "us-chicago-1"
       },
       "models": {
         "cohere.command-a-03-2025": {
@@ -41,19 +42,11 @@
           "name": "Gemini 2.5 Pro",
           "limit": { "context": 1048576, "output": 8192 }
         },
-        "xai.grok-3": {
-          "name": "Grok 3",
+        "xai.grok-3-fast": {
+          "name": "Grok 3 Fast",
           "limit": { "context": 131072, "output": 8192 }
         },
-        "xai.grok-4": {
-          "name": "Grok 4",
-          "limit": { "context": 131072, "output": 8192 }
-        },
-        "xai.grok-4.1-fast": {
-          "name": "Grok 4.1 Fast",
-          "limit": { "context": 131072, "output": 8192 }
-        },
-        "xai.grok-code-fast": {
+        "xai.grok-code-fast-1": {
           "name": "Grok Code Fast",
           "limit": { "context": 131072, "output": 8192 }
         },
