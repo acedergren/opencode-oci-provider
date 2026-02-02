@@ -855,6 +855,14 @@ describe('Reasoning Support', () => {
       expect(swePreset.supportsReasoning).toBe(true);
     });
 
+    it('should set supportsReasoning=true for Google Gemini models', () => {
+      const model = provider.languageModel('google.gemini-2.5-pro');
+      const swePreset = (model as any).swePreset;
+
+      // Gemini 2.5 Pro has thinking enabled by default (cannot be turned off)
+      expect(swePreset.supportsReasoning).toBe(true);
+    });
+
     it('should set supportsReasoning=false for non-reasoning models', () => {
       const model = provider.languageModel('meta.llama-3.3-70b-instruct');
       const swePreset = (model as any).swePreset;

@@ -56,6 +56,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsReasoning: true,  // Cohere reasoning models support thinking
   },
   // Google Gemini - excellent for code (OCI does NOT support frequencyPenalty/presencePenalty)
+  // Gemini 2.5 Pro has thinking enabled by default (cannot be turned off)
   'google': {
     temperature: 0.1,
     topP: 0.95,
@@ -63,6 +64,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: false,
+    supportsReasoning: true,  // Gemini 2.5 Pro has thinking always enabled
   },
   // xAI Grok - supports tools and reasoning, but NOT frequencyPenalty/presencePenalty or stop sequences
   'xai': {
