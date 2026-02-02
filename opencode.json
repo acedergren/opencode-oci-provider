@@ -10,8 +10,12 @@
         "region": "us-chicago-1"
       },
       "models": {
-        "xai.grok-4-1-fast": {
-          "name": "Grok 4.1 Fast",
+        "xai.grok-4.1-fast-reasoning": {
+          "name": "Grok 4.1 Fast (Reasoning)",
+          "limit": { "context": 2000000, "output": 16000 }
+        },
+        "xai.grok-4.1-fast-non-reasoning": {
+          "name": "Grok 4.1 Fast (Non-Reasoning)",
           "limit": { "context": 2000000, "output": 16000 }
         },
         "xai.grok-3-fast": {
