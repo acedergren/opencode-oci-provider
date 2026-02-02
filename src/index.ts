@@ -45,7 +45,8 @@ interface SWEPreset {
 }
 
 const SWE_PRESETS: Record<string, SWEPreset> = {
-  // Cohere models - good for instruction following, supports tools and reasoning
+  // Cohere models - good for instruction following, supports tools
+  // Note: Only cohere.command-a-reasoning-* models support thinking (handled in getSWEPreset)
   'cohere': {
     temperature: 0.2,
     topP: 0.9,
@@ -53,7 +54,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: true,
-    supportsReasoning: true,  // Cohere reasoning models support thinking
+    supportsReasoning: false,  // Only reasoning models support thinking (see getSWEPreset)
   },
   // Google Gemini - excellent for code (OCI does NOT support frequencyPenalty/presencePenalty)
   // Gemini 2.5 Pro has thinking enabled by default (cannot be turned off)
@@ -111,6 +112,11 @@ function getSWEPreset(modelId: string): SWEPreset {
   // Gemini Flash-Lite has thinking disabled for speed/cost optimization
   if (modelId.includes('flash-lite')) {
     return { ...basePreset, supportsReasoning: false };
+  }
+
+  // Cohere reasoning models (command-a-reasoning-*) support thinking
+  if (modelId.includes('reasoning')) {
+    return { ...basePreset, supportsReasoning: true };
   }
 
   return basePreset;
@@ -254,6 +260,17 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     if (this.modelFamily === 'cohere') {
       const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
       const text = cohereResponse?.text || '';
+
+      // Extract thinking content from Cohere V2 response (for reasoning models)
+      const cohereContent = (cohereResponse as any)?.content as any[] | undefined;
+      if (cohereContent && Array.isArray(cohereContent)) {
+        for (const part of cohereContent) {
+          if (part.type === 'THINKING' && part.thinking) {
+            content.push({ type: 'reasoning', text: part.thinking } as LanguageModelV2Reasoning);
+          }
+        }
+      }
+
       if (text) {
         content.push({ type: 'text', text } as LanguageModelV2Text);
       }
@@ -411,6 +428,16 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           if (modelFamily === 'cohere') {
             const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
             text = cohereResponse?.text || '';
+
+            // Extract thinking content from Cohere V2 response (for reasoning models)
+            const cohereContent = (cohereResponse as any)?.content as any[] | undefined;
+            if (cohereContent && Array.isArray(cohereContent)) {
+              for (const part of cohereContent) {
+                if (part.type === 'THINKING' && part.thinking) {
+                  reasoningContent = part.thinking;
+                }
+              }
+            }
 
             // Handle Cohere tool calls
             const cohereToolCalls = (cohereResponse as any)?.toolCalls;
@@ -626,6 +653,17 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       // Cohere SDK requires isForceSingleStep=true when both message and toolResults are present
       ...(hasToolResults && { toolResults, isForceSingleStep: true }),
     };
+
+    // Add thinking parameter for Cohere reasoning models
+    if (this.swePreset.supportsReasoning) {
+      const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
+      const budgetTokens = providerOptions?.thinkingBudgetTokens as number | undefined;
+
+      request.thinking = {
+        type: 'ENABLED',
+        ...(budgetTokens && { budgetTokens }),
+      };
+    }
 
     return request;
   }

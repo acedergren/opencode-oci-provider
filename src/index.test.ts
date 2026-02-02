@@ -855,6 +855,14 @@ describe('Reasoning Support', () => {
       expect(swePreset.supportsReasoning).toBe(true);
     });
 
+    it('should set supportsReasoning=false for non-reasoning Cohere models', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const swePreset = (model as any).swePreset;
+
+      // Standard Cohere models don't have reasoning
+      expect(swePreset.supportsReasoning).toBe(false);
+    });
+
     it('should set supportsReasoning=true for Google Gemini Pro models', () => {
       const model = provider.languageModel('google.gemini-2.5-pro');
       const swePreset = (model as any).swePreset;
@@ -940,6 +948,57 @@ describe('Reasoning Support', () => {
 
       // Should default to MEDIUM for reasoning-capable models
       expect(request.reasoningEffort).toBe('MEDIUM');
+    });
+  });
+
+  describe('buildCohereChatRequest with thinking', () => {
+    it('should include thinking parameter for Cohere reasoning models', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Think about this' }] }],
+        maxOutputTokens: 4000,
+      };
+
+      const request = buildCohereChatRequest(options);
+
+      // Should include thinking parameter with ENABLED type
+      expect(request.thinking).toBeDefined();
+      expect(request.thinking.type).toBe('ENABLED');
+    });
+
+    it('should include custom budgetTokens when specified', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Complex problem' }] }],
+        maxOutputTokens: 4000,
+        providerOptions: {
+          'oci-genai': {
+            thinkingBudgetTokens: 31000, // Maximum reasoning
+          },
+        },
+      };
+
+      const request = buildCohereChatRequest(options);
+
+      expect(request.thinking.budgetTokens).toBe(31000);
+    });
+
+    it('should not include thinking for non-reasoning Cohere models', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = buildCohereChatRequest(options);
+
+      expect(request.thinking).toBeUndefined();
     });
   });
 
