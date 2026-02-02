@@ -557,7 +557,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       ? this.convertToolsToCohere(options.tools)
       : undefined;
 
-    // Cohere requires forceSingleStep=true when both message and toolResults are present
+    // Cohere requires isForceSingleStep=true when both message and toolResults are present
     const hasToolResults = toolResults && toolResults.length > 0;
 
     return {
@@ -570,7 +570,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
       presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
       ...(tools && { tools }),
-      ...(hasToolResults && { toolResults, forceSingleStep: true }),
+      ...(hasToolResults && { toolResults, isForceSingleStep: true }),
     } as any;
   }
 

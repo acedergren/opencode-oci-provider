@@ -375,7 +375,7 @@ describe('Cohere Tool Results Handling', () => {
     });
   });
 
-  it('should include forceSingleStep=true when toolResults are present', () => {
+  it('should include isForceSingleStep=true when toolResults are present', () => {
     const model = provider.languageModel('cohere.command-a-03-2025');
     const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
 
@@ -408,11 +408,11 @@ describe('Cohere Tool Results Handling', () => {
 
     const request = buildCohereChatRequest(options);
 
-    // When tool results are present, forceSingleStep must be true
-    expect(request.forceSingleStep).toBe(true);
+    // When tool results are present, isForceSingleStep must be true
+    expect(request.isForceSingleStep).toBe(true);
   });
 
-  it('should not include forceSingleStep when no toolResults', () => {
+  it('should not include isForceSingleStep when no toolResults', () => {
     const model = provider.languageModel('cohere.command-a-03-2025');
     const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
 
@@ -425,8 +425,8 @@ describe('Cohere Tool Results Handling', () => {
 
     const request = buildCohereChatRequest(options);
 
-    // No tool results, no forceSingleStep needed
-    expect(request.forceSingleStep).toBeUndefined();
+    // No tool results, no isForceSingleStep needed
+    expect(request.isForceSingleStep).toBeUndefined();
   });
 
   it('should handle Cohere tool-result with undefined output gracefully', () => {
