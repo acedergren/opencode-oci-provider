@@ -255,7 +255,7 @@ describe('OCI Provider Tool Compatibility', () => {
 
   describe('SWE Presets and Model Parameters', () => {
     it('should set supportsPenalties=false and supportsStopSequences=false for xAI models', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       const swePreset = (model as any).swePreset;
 
       expect(swePreset.supportsPenalties).toBe(false);
@@ -291,7 +291,7 @@ describe('OCI Provider Tool Compatibility', () => {
 
   describe('buildGenericChatRequest', () => {
     it('should exclude penalty parameters for xAI models', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
@@ -346,7 +346,7 @@ describe('OCI Provider Tool Compatibility', () => {
     });
 
     it('should exclude stop sequences for xAI models', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
@@ -391,7 +391,7 @@ describe('OCI Provider Tool Compatibility', () => {
     });
 
     it('should use generic family for xAI models', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       expect((model as any).modelFamily).toBe('generic');
     });
 
@@ -737,7 +737,7 @@ describe('Generic Format Tool Results Handling', () => {
   });
 
   it('should convert tool-call in assistant message for Grok models', () => {
-    const model = provider.languageModel('xai.grok-3-fast');
+    const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
     const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
 
     const prompt = [
@@ -766,7 +766,7 @@ describe('Generic Format Tool Results Handling', () => {
   });
 
   it('should convert tool results to USER messages for Grok models', () => {
-    const model = provider.languageModel('xai.grok-3-fast');
+    const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
     const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
 
     const prompt = [
@@ -882,13 +882,20 @@ describe('Reasoning Support', () => {
   });
 
   describe('SWE Presets for Reasoning', () => {
-    it('should set supportsReasoning=false for xAI Grok models (OCI does not expose reasoning_effort)', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+    it('should set supportsReasoning=false for xAI Grok non-reasoning models', () => {
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       const swePreset = (model as any).swePreset;
 
-      // Grok models throw error: "This model does not support `reasoning_effort`"
-      // Even though OCI docs suggest it's available, it's not supported in practice
+      // Non-reasoning Grok models explicitly disable reasoning
       expect(swePreset.supportsReasoning).toBe(false);
+    });
+
+    it('should set supportsReasoning=true for xAI Grok reasoning models', () => {
+      const model = provider.languageModel('xai.grok-4.1-fast-reasoning');
+      const swePreset = (model as any).swePreset;
+
+      // Reasoning Grok models support reasoning
+      expect(swePreset.supportsReasoning).toBe(true);
     });
 
     it('should set supportsReasoning=true for Cohere reasoning models', () => {
@@ -1066,7 +1073,7 @@ describe('Reasoning Support', () => {
 
   describe('Response reasoning content extraction', () => {
     it('should extract reasoningContent from Generic API response', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       const extractReasoningContent = (model as any).extractReasoningContent?.bind(model);
 
       expect(extractReasoningContent).toBeDefined();
@@ -1087,7 +1094,7 @@ describe('Reasoning Support', () => {
     });
 
     it('should return undefined when no reasoningContent present', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
       const extractReasoningContent = (model as any).extractReasoningContent.bind(model);
 
       const genericResponse = {
@@ -1108,7 +1115,7 @@ describe('Reasoning Support', () => {
   describe('doGenerate with reasoning content', () => {
     it('should include reasoning content in response for models that support it', async () => {
       // This test verifies the response structure includes reasoning
-      const model = provider.languageModel('xai.grok-3-fast');
+      const model = provider.languageModel('xai.grok-4.1-fast-non-reasoning');
 
       // The mock returns a response, we're testing the extraction logic
       const result = await model.doGenerate({

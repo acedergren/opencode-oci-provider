@@ -76,7 +76,7 @@ export OCI_CONFIG_PROFILE=DEFAULT
 | Cohere | `cohere.command-r-08-2024` | Balanced |
 | Google | `google.gemini-2.0-flash-001` | Fast |
 | Google | `google.gemini-1.5-pro-002` | Advanced |
-| xAI | `xai.grok-2-1212` | **US regions only** |
+| xAI | `xai.grok-4.1-fast-non-reasoning` | **US regions only** |
 | Meta | `meta.llama-3.1-405b-instruct` | Large |
 | Meta | `meta.llama-3.1-70b-instruct` | Medium |
 

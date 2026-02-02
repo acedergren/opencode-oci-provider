@@ -126,6 +126,18 @@ function getSWEPreset(modelId: string): SWEPreset {
     return { ...basePreset, supportsReasoning: false };
   }
 
+  // xAI Grok 4.1+ models: -reasoning suffix enables reasoning, -non-reasoning disables
+  if (modelId.startsWith('xai.')) {
+    if (modelId.endsWith('-non-reasoning')) {
+      return { ...basePreset, supportsReasoning: false };
+    }
+    if (modelId.endsWith('-reasoning')) {
+      return { ...basePreset, supportsReasoning: true };
+    }
+    // Legacy Grok models don't support reasoning
+    return basePreset;
+  }
+
   // Cohere reasoning models (command-a-reasoning-*) support thinking
   if (modelId.includes('reasoning')) {
     return { ...basePreset, supportsReasoning: true };

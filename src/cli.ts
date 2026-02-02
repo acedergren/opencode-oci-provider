@@ -57,14 +57,9 @@ const KNOWN_MODELS: ModelInfo[] = [
   { id: 'meta.llama-3.2-11b-vision-instruct', name: 'Meta Llama 3.2 11B Vision', vendor: 'meta', capabilities: ['chat', 'vision'] },
   { id: 'meta.llama-3.1-405b-instruct', name: 'Meta Llama 3.1 405B', vendor: 'meta', capabilities: ['chat'] },
 
-  // xAI models (US regions only)
-  { id: 'xai.grok-4.1-fast', name: 'xAI Grok 4.1 Fast', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-4-fast', name: 'xAI Grok 4 Fast', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-4', name: 'xAI Grok 4', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-3', name: 'xAI Grok 3', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-3-mini', name: 'xAI Grok 3 Mini', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-3-fast', name: 'xAI Grok 3 Fast', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-code-fast-1', name: 'xAI Grok Code Fast', vendor: 'xai', capabilities: ['chat', 'code'] },
+  // xAI models (US regions only: Ashburn, Chicago, Phoenix)
+  { id: 'xai.grok-4.1-fast-reasoning', name: 'xAI Grok 4.1 Fast (Reasoning)', vendor: 'xai', capabilities: ['chat', 'vision'] },
+  { id: 'xai.grok-4.1-fast-non-reasoning', name: 'xAI Grok 4.1 Fast', vendor: 'xai', capabilities: ['chat', 'vision'] },
 
   // OpenAI models
   { id: 'openai.gpt-oss-120b', name: 'OpenAI GPT OSS 120B', vendor: 'openai', capabilities: ['chat'] },

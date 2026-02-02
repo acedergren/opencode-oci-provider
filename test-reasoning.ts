@@ -74,7 +74,7 @@ async function main() {
   // Test models that should have reasoning
   const modelsToTest = [
     'google.gemini-2.5-flash',  // Always has thinking
-    'xai.grok-3-fast',          // Has reasoningEffort
+    'xai.grok-4.1-fast-non-reasoning',          // Has reasoningEffort
   ];
 
   for (const model of modelsToTest) {
