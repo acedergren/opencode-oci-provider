@@ -755,13 +755,54 @@ describe('Generic Format Tool Results Handling', () => {
 
     expect(messages).toHaveLength(2);
     expect(messages[1].role).toBe('ASSISTANT');
-    // Should have both text and tool call content
+    // For xAI/Grok: tool calls are converted to text representation (Grok rejects TOOL_CALL content type)
     const assistantContent = messages[1].content as any[];
-    expect(assistantContent.length).toBe(2);
+    expect(assistantContent.length).toBe(1);
     expect(assistantContent[0].type).toBe('TEXT');
-    expect(assistantContent[1].type).toBe('TOOL_CALL');
-    expect(assistantContent[1].id).toBe('call_ls');
-    expect(assistantContent[1].name).toBe('bash');
+    // Text should contain original message plus tool call description
+    expect(assistantContent[0].text).toContain('Let me check.');
+    expect(assistantContent[0].text).toContain('[Called tool "bash"');
+    expect(assistantContent[0].text).toContain('{"command":"ls"}');
+  });
+
+  it('should convert tool results to USER messages for Grok models', () => {
+    const model = provider.languageModel('xai.grok-3-fast');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'Let me check.' },
+          { type: 'tool-call' as const, toolCallId: 'call_ls', toolName: 'bash', input: '{"command":"ls"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_ls',
+            toolName: 'bash',
+            output: { type: 'text' as const, value: 'file1.txt\nfile2.txt' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    // For xAI/Grok: tool results are converted to USER messages (Grok rejects TOOL role)
+    expect(messages).toHaveLength(3);
+    expect(messages[0].role).toBe('USER');
+    expect(messages[1].role).toBe('ASSISTANT');
+    // Tool result should be converted to USER message
+    expect(messages[2].role).toBe('USER');
+    const toolResultContent = messages[2].content as any[];
+    expect(toolResultContent[0].type).toBe('TEXT');
+    expect(toolResultContent[0].text).toContain('[Tool result from "bash"');
+    expect(toolResultContent[0].text).toContain('file1.txt');
   });
 
   it('should handle complete tool flow for Llama models', () => {
