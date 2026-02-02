@@ -262,21 +262,50 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
       if (message?.content && Array.isArray(message.content)) {
         for (const part of message.content) {
-          if (part.type === 'TEXT') {
+          const partType = (part.type || '').toUpperCase();
+          if (partType === 'TEXT') {
             const textPart = part as oci.models.TextContent;
             content.push({ type: 'text', text: textPart.text } as LanguageModelV2Text);
-          } else if (part.type === 'TOOL_CALL') {
+          } else if (partType === 'TOOL_CALL' || partType === 'FUNCTION_CALL' || (part as any).functionCall) {
             const toolPart = part as any;
+            // Handle various tool call formats (OCI generic, Gemini function_call)
+            const funcCall = toolPart.functionCall || toolPart.function || toolPart;
             const args = typeof toolPart.arguments === 'string'
               ? toolPart.arguments
-              : JSON.stringify(toolPart.arguments || toolPart.function?.arguments || {});
+              : typeof funcCall.arguments === 'string'
+              ? funcCall.arguments
+              : JSON.stringify(toolPart.arguments || funcCall.arguments || funcCall.args || {});
             content.push({
               type: 'tool-call',
-              toolCallId: toolPart.id || generateId(),
-              toolName: toolPart.name || toolPart.function?.name,
+              toolCallId: toolPart.id || funcCall.id || generateId(),
+              toolName: toolPart.name || funcCall.name,
               input: args,
             } as LanguageModelV2ToolCall);
           }
+        }
+      } else if (typeof message?.content === 'string') {
+        // Fallback: message.content is a string directly
+        content.push({ type: 'text', text: message.content } as LanguageModelV2Text);
+      } else if ((message as any)?.text) {
+        // Fallback: message has a text property directly
+        content.push({ type: 'text', text: (message as any).text } as LanguageModelV2Text);
+      }
+
+      // Also check for tool_calls at the message level (some models put them there)
+      const msgToolCalls = (message as any)?.tool_calls || (message as any)?.toolCalls || (message as any)?.function_call;
+      if (msgToolCalls) {
+        const calls = Array.isArray(msgToolCalls) ? msgToolCalls : [msgToolCalls];
+        for (const tc of calls) {
+          const funcCall = tc.function || tc;
+          const args = typeof funcCall.arguments === 'string'
+            ? funcCall.arguments
+            : JSON.stringify(funcCall.arguments || funcCall.args || {});
+          content.push({
+            type: 'tool-call',
+            toolCallId: tc.id || generateId(),
+            toolName: funcCall.name || tc.name,
+            input: args,
+          } as LanguageModelV2ToolCall);
         }
       }
 
@@ -347,6 +376,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           // Debug: log the full response structure
           if (process.env.OCI_DEBUG) {
             console.error('[OCI Debug] Chat Result:', JSON.stringify(chatResult, null, 2));
+            console.error('[OCI Debug] Model Family:', modelFamily);
           }
 
           if (modelFamily === 'cohere') {
@@ -369,26 +399,67 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             finishReason = toolCalls.length > 0 ? 'tool-calls' : mapFinishReason(cohereResponse?.finishReason);
           } else {
             const genericResponse = chatResult?.chatResponse as oci.models.GenericChatResponse | undefined;
+
+            if (process.env.OCI_DEBUG) {
+              console.error('[OCI Debug] Generic Response:', JSON.stringify(genericResponse, null, 2));
+              console.error('[OCI Debug] Choices:', JSON.stringify(genericResponse?.choices, null, 2));
+            }
+
             const choice = genericResponse?.choices?.[0];
             const message = choice?.message as oci.models.AssistantMessage | undefined;
 
+            if (process.env.OCI_DEBUG) {
+              console.error('[OCI Debug] Choice:', JSON.stringify(choice, null, 2));
+              console.error('[OCI Debug] Message:', JSON.stringify(message, null, 2));
+              console.error('[OCI Debug] Message content:', JSON.stringify(message?.content, null, 2));
+            }
+
             if (message?.content && Array.isArray(message.content)) {
               for (const part of message.content) {
-                if (part.type === 'TEXT') {
+                const partType = (part.type || '').toUpperCase();
+                if (partType === 'TEXT') {
                   const textPart = part as oci.models.TextContent;
                   text += textPart.text;
-                } else if (part.type === 'TOOL_CALL') {
+                } else if (partType === 'TOOL_CALL' || partType === 'FUNCTION_CALL' || (part as any).functionCall) {
                   const toolPart = part as any;
+                  // Handle various tool call formats (OCI generic, Gemini function_call)
+                  const funcCall = toolPart.functionCall || toolPart.function || toolPart;
                   const args = typeof toolPart.arguments === 'string'
                     ? toolPart.arguments
-                    : JSON.stringify(toolPart.arguments || toolPart.function?.arguments || {});
+                    : typeof funcCall.arguments === 'string'
+                    ? funcCall.arguments
+                    : JSON.stringify(toolPart.arguments || funcCall.arguments || funcCall.args || {});
                   toolCalls.push({
                     type: 'tool-call',
-                    toolCallId: toolPart.id || generateId(),
-                    toolName: toolPart.name || toolPart.function?.name,
+                    toolCallId: toolPart.id || funcCall.id || generateId(),
+                    toolName: toolPart.name || funcCall.name,
                     input: args,
                   });
                 }
+              }
+            } else if (typeof message?.content === 'string') {
+              // Fallback: message.content is a string directly
+              text = message.content;
+            } else if ((message as any)?.text) {
+              // Fallback: message has a text property directly
+              text = (message as any).text;
+            }
+
+            // Also check for tool_calls at the message level (some models put them there)
+            const msgToolCalls = (message as any)?.tool_calls || (message as any)?.toolCalls || (message as any)?.function_call;
+            if (msgToolCalls) {
+              const calls = Array.isArray(msgToolCalls) ? msgToolCalls : [msgToolCalls];
+              for (const tc of calls) {
+                const funcCall = tc.function || tc;
+                const args = typeof funcCall.arguments === 'string'
+                  ? funcCall.arguments
+                  : JSON.stringify(funcCall.arguments || funcCall.args || {});
+                toolCalls.push({
+                  type: 'tool-call',
+                  toolCallId: tc.id || generateId(),
+                  toolName: funcCall.name || tc.name,
+                  input: args,
+                });
               }
             }
 
@@ -486,6 +557,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       ? this.convertToolsToCohere(options.tools)
       : undefined;
 
+    // Cohere requires forceSingleStep=true when both message and toolResults are present
+    const hasToolResults = toolResults && toolResults.length > 0;
+
     return {
       apiFormat: oci.models.CohereChatRequest.apiFormat,
       message,
@@ -496,7 +570,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
       presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
       ...(tools && { tools }),
-      ...(toolResults && toolResults.length > 0 && { toolResults }),
+      ...(hasToolResults && { toolResults, forceSingleStep: true }),
     } as any;
   }
 
@@ -652,12 +726,19 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         for (const part of msg.content) {
           if (part.type === 'tool-result') {
             let resultValue: any;
-            if (part.output.type === 'text' || part.output.type === 'error-text') {
-              resultValue = part.output.value;
-            } else if (part.output.type === 'json') {
-              resultValue = part.output.value;
+            const output = part.output;
+
+            // Handle undefined/null output gracefully
+            if (!output) {
+              resultValue = '';
+            } else if (typeof output === 'string') {
+              resultValue = output;
+            } else if (output.type === 'text' || output.type === 'error-text') {
+              resultValue = output.value ?? '';
+            } else if (output.type === 'json') {
+              resultValue = output.value;
             } else {
-              resultValue = String(part.output);
+              resultValue = typeof output === 'object' ? JSON.stringify(output) : String(output);
             }
 
             // Find the corresponding tool call from previous assistant message
@@ -765,12 +846,21 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           if (part.type === 'tool-result') {
             // V2 uses `output` with { type, value } structure
             let resultText: string;
-            if (part.output.type === 'text' || part.output.type === 'error-text') {
-              resultText = part.output.value;
-            } else if (part.output.type === 'json') {
-              resultText = JSON.stringify(part.output.value);
+            const output = part.output;
+
+            // Handle undefined/null output gracefully
+            if (!output) {
+              resultText = '';
+            } else if (typeof output === 'string') {
+              // Raw string output
+              resultText = output;
+            } else if (output.type === 'text' || output.type === 'error-text') {
+              resultText = output.value ?? '';
+            } else if (output.type === 'json') {
+              resultText = JSON.stringify(output.value);
             } else {
-              resultText = String(part.output);
+              // Fallback for unknown output types
+              resultText = typeof output === 'object' ? JSON.stringify(output) : String(output);
             }
             const textContent: oci.models.TextContent = {
               type: oci.models.TextContent.type,

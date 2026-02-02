@@ -365,6 +365,238 @@ describe('OCI Provider Tool Compatibility', () => {
   });
 });
 
+describe('Cohere Tool Results Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should include forceSingleStep=true when toolResults are present', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
+
+    // Simulate a conversation with tool results
+    const options = {
+      prompt: [
+        { role: 'user' as const, content: [{ type: 'text' as const, text: 'What is the current directory?' }] },
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"pwd"}' }
+          ]
+        },
+        {
+          role: 'tool' as const,
+          content: [
+            {
+              type: 'tool-result' as const,
+              toolCallId: 'call_1',
+              output: { type: 'text' as const, value: '/Users/test/project' }
+            }
+          ]
+        },
+      ],
+      maxOutputTokens: 1000,
+      tools: [
+        { type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }
+      ],
+    };
+
+    const request = buildCohereChatRequest(options);
+
+    // When tool results are present, forceSingleStep must be true
+    expect(request.forceSingleStep).toBe(true);
+  });
+
+  it('should not include forceSingleStep when no toolResults', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const buildCohereChatRequest = (model as any).buildCohereChatRequest.bind(model);
+
+    const options = {
+      prompt: [
+        { role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] },
+      ],
+      maxOutputTokens: 1000,
+    };
+
+    const request = buildCohereChatRequest(options);
+
+    // No tool results, no forceSingleStep needed
+    expect(request.forceSingleStep).toBeUndefined();
+  });
+
+  it('should handle Cohere tool-result with undefined output gracefully', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const convertMessagesToCohereFormat = (model as any).convertMessagesToCohereFormat.bind(model);
+
+    // Simulate a conversation with undefined tool result output
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'Run pwd' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            output: undefined as any
+          }
+        ]
+      },
+    ];
+
+    // Should not throw and should handle undefined gracefully
+    const result = convertMessagesToCohereFormat(prompt);
+
+    expect(result.toolResults).toBeDefined();
+    expect(result.toolResults.length).toBe(1);
+    expect(result.toolResults[0].outputs).toBeDefined();
+    // Empty string result for undefined output
+    expect(result.toolResults[0].outputs[0].result).toBe('');
+  });
+
+  it('should handle Cohere tool-result with string output', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const convertMessagesToCohereFormat = (model as any).convertMessagesToCohereFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'Run pwd' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            output: '/Users/test/project' as any // Raw string output
+          }
+        ]
+      },
+    ];
+
+    const result = convertMessagesToCohereFormat(prompt);
+
+    expect(result.toolResults).toBeDefined();
+    expect(result.toolResults.length).toBe(1);
+    expect(result.toolResults[0].outputs[0].result).toBe('/Users/test/project');
+  });
+});
+
+describe('Tool Result Message Conversion', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should handle tool-result with text output type', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: 'call_123',
+          output: { type: 'text' as const, value: '/Users/test/project' }
+        }]
+      }
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('TOOL');
+    expect(messages[0].content[0].text).toBe('/Users/test/project');
+    expect(messages[0].toolCallId).toBe('call_123');
+  });
+
+  it('should handle tool-result with json output type', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: 'call_456',
+          output: { type: 'json' as const, value: { files: ['a.ts', 'b.ts'] } }
+        }]
+      }
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content[0].text).toBe('{"files":["a.ts","b.ts"]}');
+  });
+
+  it('should handle tool-result with raw string output (fallback)', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    // Some providers might send raw string output
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: 'call_789',
+          output: '/Users/test/project' as any // Raw string
+        }]
+      }
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].content[0].text).toBe('/Users/test/project');
+  });
+
+  it('should handle tool-result with undefined output gracefully', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    // Edge case: output might be undefined
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: 'call_undefined',
+          output: undefined as any
+        }]
+      }
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    // Should not crash and should provide empty or placeholder text
+    expect(messages[0].content[0].text).toBeDefined();
+    expect(messages[0].content[0].text).not.toBe('undefined');
+  });
+});
+
 describe('Provider Instantiation', () => {
   it('should create provider with settings', () => {
     const provider = createOCI({
