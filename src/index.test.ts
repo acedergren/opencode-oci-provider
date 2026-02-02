@@ -841,11 +841,13 @@ describe('Reasoning Support', () => {
   });
 
   describe('SWE Presets for Reasoning', () => {
-    it('should set supportsReasoning=true for xAI Grok models', () => {
+    it('should set supportsReasoning=false for xAI Grok models (OCI does not expose reasoning_effort)', () => {
       const model = provider.languageModel('xai.grok-3-fast');
       const swePreset = (model as any).swePreset;
 
-      expect(swePreset.supportsReasoning).toBe(true);
+      // Grok models throw error: "This model does not support `reasoning_effort`"
+      // Even though OCI docs suggest it's available, it's not supported in practice
+      expect(swePreset.supportsReasoning).toBe(false);
     });
 
     it('should set supportsReasoning=true for Cohere reasoning models', () => {
@@ -914,7 +916,8 @@ describe('Reasoning Support', () => {
 
   describe('buildGenericChatRequest with reasoning', () => {
     it('should include reasoningEffort for models that support reasoning', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      // Use Gemini which supports reasoning (unlike Grok which throws error)
+      const model = provider.languageModel('google.gemini-2.5-flash');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
@@ -952,7 +955,8 @@ describe('Reasoning Support', () => {
     });
 
     it('should default to MEDIUM reasoningEffort when not specified for reasoning models', () => {
-      const model = provider.languageModel('xai.grok-3-fast');
+      // Use Gemini which supports reasoning (unlike Grok which throws error)
+      const model = provider.languageModel('google.gemini-2.5-flash');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {

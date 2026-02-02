@@ -67,7 +67,9 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsPenalties: false,
     supportsReasoning: true,  // Gemini 2.5 Pro has thinking always enabled
   },
-  // xAI Grok - supports tools and reasoning, but NOT frequencyPenalty/presencePenalty or stop sequences
+  // xAI Grok - supports tools, but NOT frequencyPenalty/presencePenalty, stop sequences, or reasoning_effort
+  // Note: OCI docs suggest reasoning_effort is available, but Grok models throw:
+  // "This model does not support `reasoning_effort`"
   'xai': {
     temperature: 0.1,
     topP: 0.9,
@@ -76,7 +78,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsTools: true,
     supportsPenalties: false,
     supportsStopSequences: false,  // Per OCI docs, stop sequences not listed as supported
-    supportsReasoning: true,       // Grok supports reasoningEffort parameter
+    supportsReasoning: false,      // Grok throws error: "This model does not support `reasoning_effort`"
   },
   // Meta Llama - balanced for code, no reasoning support
   'meta': {
