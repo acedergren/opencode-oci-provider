@@ -887,11 +887,28 @@ describe('Reasoning Support', () => {
       expect(swePreset.supportsReasoning).toBe(false);
     });
 
-    it('should set supportsReasoning=false for non-reasoning models', () => {
+    it('should set supportsReasoning=false for non-reasoning Meta Llama 3 models', () => {
       const model = provider.languageModel('meta.llama-3.3-70b-instruct');
       const swePreset = (model as any).swePreset;
 
       expect(swePreset.supportsReasoning).toBe(false);
+    });
+
+    it('should set supportsReasoning=true for Meta Llama 4 models', () => {
+      const maverick = provider.languageModel('meta.llama-4-maverick-17b-128e-instruct-fp8');
+      const scout = provider.languageModel('meta.llama-4-scout-17b-16e-instruct');
+
+      expect((maverick as any).swePreset.supportsReasoning).toBe(true);
+      expect((scout as any).swePreset.supportsReasoning).toBe(true);
+    });
+
+    it('should set supportsReasoning=true for OpenAI gpt-oss models', () => {
+      const model = provider.languageModel('openai.gpt-oss-120b');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsReasoning).toBe(true);
+      expect(swePreset.supportsTools).toBe(true);
+      expect(swePreset.supportsPenalties).toBe(true);
     });
   });
 

@@ -88,6 +88,16 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsPenalties: true,
     supportsReasoning: false,
   },
+  // OpenAI gpt-oss models - supports tools, reasoning, and penalties
+  'openai': {
+    temperature: 0.1,
+    topP: 0.9,
+    frequencyPenalty: 0,
+    presencePenalty: 0,
+    supportsTools: true,
+    supportsPenalties: true,
+    supportsReasoning: true,  // Has reasoning capabilities
+  },
   // Default fallback
   'default': {
     temperature: 0.2,
@@ -116,6 +126,11 @@ function getSWEPreset(modelId: string): SWEPreset {
 
   // Cohere reasoning models (command-a-reasoning-*) support thinking
   if (modelId.includes('reasoning')) {
+    return { ...basePreset, supportsReasoning: true };
+  }
+
+  // Meta Llama 4 models (maverick, scout) support reasoning
+  if (modelId.includes('llama-4')) {
     return { ...basePreset, supportsReasoning: true };
   }
 
