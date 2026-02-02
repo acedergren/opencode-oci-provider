@@ -486,22 +486,22 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           }
 
           // Emit tool calls using V2 format (tool-input-* events, then full tool-call)
+          // IMPORTANT: The `id` in tool-input-* events must match toolCallId in the final tool-call
           for (const toolCall of toolCalls) {
-            const toolInputId = generateId();
-            // Stream tool input
+            // Stream tool input using the SAME ID as the final tool-call
             controller.enqueue({
               type: 'tool-input-start',
-              id: toolInputId,
+              id: toolCall.toolCallId,
               toolName: toolCall.toolName,
             });
             controller.enqueue({
               type: 'tool-input-delta',
-              id: toolInputId,
+              id: toolCall.toolCallId,
               delta: toolCall.input,
             });
             controller.enqueue({
               type: 'tool-input-end',
-              id: toolInputId,
+              id: toolCall.toolCallId,
             });
             // Emit complete tool call
             controller.enqueue(toolCall);
@@ -611,13 +611,26 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
   private convertToolsToCohere(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
     if (!tools || tools.length === 0) return undefined;
 
-    return tools
+    const cohereTools = tools
       .filter((tool): tool is LanguageModelV2FunctionTool => tool.type === 'function')
-      .map(tool => ({
-        name: tool.name,
-        description: tool.description || '',
-        parameterDefinitions: jsonSchemaToCohereparams(tool.inputSchema as JSONSchema7),
-      }));
+      .map(tool => {
+        const paramDefs = jsonSchemaToCohereparams(tool.inputSchema as JSONSchema7);
+
+        // Debug: log tool conversion
+        if (process.env.OCI_DEBUG) {
+          console.error('[OCI Debug] Converting tool:', tool.name);
+          console.error('[OCI Debug] Input schema:', JSON.stringify(tool.inputSchema, null, 2));
+          console.error('[OCI Debug] Cohere parameterDefinitions:', JSON.stringify(paramDefs, null, 2));
+        }
+
+        return {
+          name: tool.name,
+          description: tool.description || '',
+          parameterDefinitions: paramDefs,
+        };
+      });
+
+    return cohereTools;
   }
 
   private convertTools(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
