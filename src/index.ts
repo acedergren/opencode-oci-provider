@@ -13,6 +13,7 @@ import type {
   LanguageModelV2Content,
   LanguageModelV2Usage,
   LanguageModelV2Text,
+  LanguageModelV2Reasoning,
   LanguageModelV2ToolCall,
   LanguageModelV2FunctionTool,
   ProviderV2,
@@ -40,10 +41,11 @@ interface SWEPreset {
   supportsTools: boolean;
   supportsPenalties: boolean;
   supportsStopSequences?: boolean;  // Default true if not specified
+  supportsReasoning?: boolean;      // Default false if not specified
 }
 
 const SWE_PRESETS: Record<string, SWEPreset> = {
-  // Cohere models - good for instruction following, supports tools
+  // Cohere models - good for instruction following, supports tools and reasoning
   'cohere': {
     temperature: 0.2,
     topP: 0.9,
@@ -51,6 +53,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: true,
+    supportsReasoning: true,  // Cohere reasoning models support thinking
   },
   // Google Gemini - excellent for code (OCI does NOT support frequencyPenalty/presencePenalty)
   'google': {
@@ -61,7 +64,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsTools: true,
     supportsPenalties: false,
   },
-  // xAI Grok - supports tools but NOT frequencyPenalty/presencePenalty or stop sequences
+  // xAI Grok - supports tools and reasoning, but NOT frequencyPenalty/presencePenalty or stop sequences
   'xai': {
     temperature: 0.1,
     topP: 0.9,
@@ -70,8 +73,9 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsTools: true,
     supportsPenalties: false,
     supportsStopSequences: false,  // Per OCI docs, stop sequences not listed as supported
+    supportsReasoning: true,       // Grok supports reasoningEffort parameter
   },
-  // Meta Llama - balanced for code
+  // Meta Llama - balanced for code, no reasoning support
   'meta': {
     temperature: 0.2,
     topP: 0.9,
@@ -79,6 +83,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: true,
+    supportsReasoning: false,
   },
   // Default fallback
   'default': {
@@ -88,6 +93,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: true,
+    supportsReasoning: false,
   },
 };
 
@@ -314,6 +320,12 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         }
       }
 
+      // Extract reasoning content if present (for models that support reasoning)
+      const reasoningContent = (message as any)?.reasoningContent;
+      if (reasoningContent && this.swePreset.supportsReasoning) {
+        content.unshift({ type: 'reasoning', text: reasoningContent } as LanguageModelV2Reasoning);
+      }
+
       finishReason = mapFinishReason(choice?.finishReason);
       const usageInfo = genericResponse?.usage;
       promptTokens = usageInfo?.promptTokens || 0;
@@ -349,10 +361,12 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
     const client = this.client;
     const modelFamily = this.modelFamily;
+    const swePreset = this.swePreset;
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       async start(controller) {
         const textId = generateId();
+        const reasoningId = generateId();
 
         try {
           controller.enqueue({
@@ -373,6 +387,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
           const chatResult = response.chatResult;
           let text = '';
+          let reasoningContent = '';
           let finishReason: LanguageModelV2FinishReason;
           let promptTokens = 0;
           let completionTokens = 0;
@@ -471,10 +486,31 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               }
             }
 
+            // Extract reasoning content if present
+            if ((message as any)?.reasoningContent && swePreset.supportsReasoning) {
+              reasoningContent = (message as any).reasoningContent;
+            }
+
             finishReason = mapFinishReason(choice?.finishReason);
             const usageInfo = genericResponse?.usage;
             promptTokens = usageInfo?.promptTokens || 0;
             completionTokens = usageInfo?.completionTokens || 0;
+          }
+
+          // Emit reasoning content first (if present)
+          if (reasoningContent) {
+            controller.enqueue({ type: 'reasoning-start', id: reasoningId });
+
+            const chunkSize = 50;
+            for (let i = 0; i < reasoningContent.length; i += chunkSize) {
+              controller.enqueue({
+                type: 'reasoning-delta',
+                id: reasoningId,
+                delta: reasoningContent.slice(i, i + chunkSize),
+              });
+            }
+
+            controller.enqueue({ type: 'reasoning-end', id: reasoningId });
           }
 
           // Emit text content
@@ -614,7 +650,23 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       request.presencePenalty = this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty);
     }
 
+    // Include reasoningEffort for models that support reasoning
+    if (this.swePreset.supportsReasoning) {
+      const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
+      const reasoningEffort = providerOptions?.reasoningEffort as string | undefined;
+      // Default to MEDIUM if not specified
+      request.reasoningEffort = reasoningEffort || 'MEDIUM';
+    }
+
     return request;
+  }
+
+  /**
+   * Extract reasoning content from Generic API response
+   */
+  extractReasoningContent(genericResponse: any): string | undefined {
+    const message = genericResponse?.choices?.[0]?.message;
+    return message?.reasoningContent;
   }
 
   /**

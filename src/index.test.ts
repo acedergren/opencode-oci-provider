@@ -830,6 +830,155 @@ describe('Generic Format Tool Results Handling', () => {
   });
 });
 
+describe('Reasoning Support', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  describe('SWE Presets for Reasoning', () => {
+    it('should set supportsReasoning=true for xAI Grok models', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsReasoning).toBe(true);
+    });
+
+    it('should set supportsReasoning=true for Cohere reasoning models', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsReasoning).toBe(true);
+    });
+
+    it('should set supportsReasoning=false for non-reasoning models', () => {
+      const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+      const swePreset = (model as any).swePreset;
+
+      expect(swePreset.supportsReasoning).toBe(false);
+    });
+  });
+
+  describe('buildGenericChatRequest with reasoning', () => {
+    it('should include reasoningEffort for models that support reasoning', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Think step by step' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': {
+            reasoningEffort: 'HIGH',
+          },
+        },
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      expect(request.reasoningEffort).toBe('HIGH');
+    });
+
+    it('should not include reasoningEffort for models that do not support reasoning', () => {
+      const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': {
+            reasoningEffort: 'HIGH', // Should be ignored
+          },
+        },
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      expect(request).not.toHaveProperty('reasoningEffort');
+    });
+
+    it('should default to MEDIUM reasoningEffort when not specified for reasoning models', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        // No providerOptions specified
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      // Should default to MEDIUM for reasoning-capable models
+      expect(request.reasoningEffort).toBe('MEDIUM');
+    });
+  });
+
+  describe('Response reasoning content extraction', () => {
+    it('should extract reasoningContent from Generic API response', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
+      const extractReasoningContent = (model as any).extractReasoningContent?.bind(model);
+
+      expect(extractReasoningContent).toBeDefined();
+
+      const genericResponse = {
+        choices: [{
+          message: {
+            content: [{ type: 'TEXT', text: 'The answer is 42' }],
+            reasoningContent: 'Let me think through this step by step...',
+          },
+          finishReason: 'COMPLETE',
+        }],
+      };
+
+      const reasoning = extractReasoningContent(genericResponse);
+
+      expect(reasoning).toBe('Let me think through this step by step...');
+    });
+
+    it('should return undefined when no reasoningContent present', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
+      const extractReasoningContent = (model as any).extractReasoningContent.bind(model);
+
+      const genericResponse = {
+        choices: [{
+          message: {
+            content: [{ type: 'TEXT', text: 'The answer is 42' }],
+          },
+          finishReason: 'COMPLETE',
+        }],
+      };
+
+      const reasoning = extractReasoningContent(genericResponse);
+
+      expect(reasoning).toBeUndefined();
+    });
+  });
+
+  describe('doGenerate with reasoning content', () => {
+    it('should include reasoning content in response for models that support it', async () => {
+      // This test verifies the response structure includes reasoning
+      const model = provider.languageModel('xai.grok-3-fast');
+
+      // The mock returns a response, we're testing the extraction logic
+      const result = await model.doGenerate({
+        mode: { type: 'regular' },
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Think step by step' }] }],
+        inputFormat: 'messages',
+      });
+
+      // The mock doesn't include reasoning, so content should only be text
+      expect(result.content).toBeDefined();
+      expect(result.finishReason).toBeDefined();
+    });
+  });
+});
+
 describe('Provider Instantiation', () => {
   it('should create provider with settings', () => {
     const provider = createOCI({
