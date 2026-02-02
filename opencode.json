@@ -15,7 +15,16 @@
         },
         "google.gemini-2.5-flash": {
           "name": "Gemini 2.5 Flash",
-          "limit": { "context": 1048576, "output": 8192 }
+          "limit": { "context": 1048576, "output": 8192 },
+          "options": {
+            "reasoningEffort": "MEDIUM"
+          },
+          "variants": {
+            "none": { "reasoningEffort": "NONE" },
+            "low": { "reasoningEffort": "LOW" },
+            "medium": { "reasoningEffort": "MEDIUM" },
+            "high": { "reasoningEffort": "HIGH" }
+          }
         },
         "google.gemini-2.5-flash-lite": {
           "name": "Gemini 2.5 Flash Lite",
