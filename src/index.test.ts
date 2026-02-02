@@ -254,19 +254,21 @@ describe('OCI Provider Tool Compatibility', () => {
   });
 
   describe('SWE Presets and Model Parameters', () => {
-    it('should set supportsPenalties=false for xAI models', () => {
-      const model = provider.languageModel('xai.grok-4');
+    it('should set supportsPenalties=false and supportsStopSequences=false for xAI models', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
       const swePreset = (model as any).swePreset;
 
       expect(swePreset.supportsPenalties).toBe(false);
       expect(swePreset.supportsTools).toBe(true);
+      expect(swePreset.supportsStopSequences).toBe(false);
     });
 
-    it('should set supportsPenalties=true for Google models', () => {
+    it('should set supportsPenalties=false for Google models (OCI limitation)', () => {
       const model = provider.languageModel('google.gemini-2.5-pro');
       const swePreset = (model as any).swePreset;
 
-      expect(swePreset.supportsPenalties).toBe(true);
+      // OCI's Gemini integration doesn't support penalty parameters
+      expect(swePreset.supportsPenalties).toBe(false);
       expect(swePreset.supportsTools).toBe(true);
     });
 
@@ -289,7 +291,7 @@ describe('OCI Provider Tool Compatibility', () => {
 
   describe('buildGenericChatRequest', () => {
     it('should exclude penalty parameters for xAI models', () => {
-      const model = provider.languageModel('xai.grok-4');
+      const model = provider.languageModel('xai.grok-3-fast');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
@@ -307,8 +309,26 @@ describe('OCI Provider Tool Compatibility', () => {
       expect(request.topP).toBeDefined();
     });
 
-    it('should include penalty parameters for Google models', () => {
+    it('should exclude penalty parameters for Google models (OCI limitation)', () => {
       const model = provider.languageModel('google.gemini-2.5-flash');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        frequencyPenalty: 0.5, // Should be ignored for Google via OCI
+        presencePenalty: 0.3,  // Should be ignored for Google via OCI
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      // OCI's Gemini doesn't support penalty parameters
+      expect(request).not.toHaveProperty('frequencyPenalty');
+      expect(request).not.toHaveProperty('presencePenalty');
+    });
+
+    it('should include penalty parameters for models that support them', () => {
+      const model = provider.languageModel('meta.llama-3.3-70b-instruct');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
@@ -320,25 +340,42 @@ describe('OCI Provider Tool Compatibility', () => {
 
       const request = buildGenericChatRequest(options);
 
+      // Meta models support penalty parameters
       expect(request.frequencyPenalty).toBe(0.5);
       expect(request.presencePenalty).toBe(0.3);
     });
 
-    it('should use SWE preset defaults when penalties not specified', () => {
-      const model = provider.languageModel('google.gemini-2.5-pro');
+    it('should exclude stop sequences for xAI models', () => {
+      const model = provider.languageModel('xai.grok-3-fast');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
         prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
         maxOutputTokens: 1000,
-        // No penalties specified
+        stopSequences: ['STOP', 'END'], // Should be ignored for xAI
       };
 
       const request = buildGenericChatRequest(options);
 
-      // Should use defaults from google preset (0)
-      expect(request.frequencyPenalty).toBe(0);
-      expect(request.presencePenalty).toBe(0);
+      // xAI doesn't support stop sequences
+      expect(request).not.toHaveProperty('stop');
+      expect(request.temperature).toBeDefined();
+    });
+
+    it('should include stop sequences for Gemini models', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        stopSequences: ['STOP', 'END'],
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      // Gemini supports stop sequences
+      expect(request.stop).toEqual(['STOP', 'END']);
     });
   });
 
@@ -354,7 +391,7 @@ describe('OCI Provider Tool Compatibility', () => {
     });
 
     it('should use generic family for xAI models', () => {
-      const model = provider.languageModel('xai.grok-4');
+      const model = provider.languageModel('xai.grok-3-fast');
       expect((model as any).modelFamily).toBe('generic');
     });
 
@@ -700,7 +737,7 @@ describe('Generic Format Tool Results Handling', () => {
   });
 
   it('should convert tool-call in assistant message for Grok models', () => {
-    const model = provider.languageModel('xai.grok-4');
+    const model = provider.languageModel('xai.grok-3-fast');
     const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
 
     const prompt = [

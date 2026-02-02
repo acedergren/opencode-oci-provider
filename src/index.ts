@@ -39,6 +39,7 @@ interface SWEPreset {
   presencePenalty: number;
   supportsTools: boolean;
   supportsPenalties: boolean;
+  supportsStopSequences?: boolean;  // Default true if not specified
 }
 
 const SWE_PRESETS: Record<string, SWEPreset> = {
@@ -51,16 +52,16 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsTools: true,
     supportsPenalties: true,
   },
-  // Google Gemini - excellent for code
+  // Google Gemini - excellent for code (OCI does NOT support frequencyPenalty/presencePenalty)
   'google': {
     temperature: 0.1,
     topP: 0.95,
     frequencyPenalty: 0,
     presencePenalty: 0,
     supportsTools: true,
-    supportsPenalties: true,
+    supportsPenalties: false,
   },
-  // xAI Grok - does NOT support frequencyPenalty/presencePenalty
+  // xAI Grok - supports tools but NOT frequencyPenalty/presencePenalty or stop sequences
   'xai': {
     temperature: 0.1,
     topP: 0.9,
@@ -68,6 +69,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: false,
+    supportsStopSequences: false,  // Per OCI docs, stop sequences not listed as supported
   },
   // Meta Llama - balanced for code
   'meta': {
@@ -265,7 +267,10 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           const partType = (part.type || '').toUpperCase();
           if (partType === 'TEXT') {
             const textPart = part as oci.models.TextContent;
-            content.push({ type: 'text', text: textPart.text } as LanguageModelV2Text);
+            // Only add text content if there's actual text (Gemini may return empty TEXT objects with tool calls)
+            if (textPart.text) {
+              content.push({ type: 'text', text: textPart.text } as LanguageModelV2Text);
+            }
           } else if (partType === 'TOOL_CALL' || partType === 'FUNCTION_CALL' || (part as any).functionCall) {
             const toolPart = part as any;
             // Handle various tool call formats (OCI generic, Gemini function_call)
@@ -419,7 +424,10 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
                 const partType = (part.type || '').toUpperCase();
                 if (partType === 'TEXT') {
                   const textPart = part as oci.models.TextContent;
-                  text += textPart.text;
+                  // Only add text if it exists (Gemini may return empty TEXT objects with tool calls)
+                  if (textPart.text) {
+                    text += textPart.text;
+                  }
                 } else if (partType === 'TOOL_CALL' || partType === 'FUNCTION_CALL' || (part as any).functionCall) {
                   const toolPart = part as any;
                   // Handle various tool call formats (OCI generic, Gemini function_call)
@@ -585,6 +593,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       ? this.convertTools(options.tools)
       : undefined;
 
+    // Check if model supports stop sequences (defaults to true if not specified)
+    const supportsStop = this.swePreset.supportsStopSequences !== false;
+
     // Base request
     const request: any = {
       apiFormat: oci.models.GenericChatRequest.apiFormat,
@@ -592,7 +603,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       maxTokens: options.maxOutputTokens,
       temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
       topP: this.applyDefaults(options.topP, this.swePreset.topP),
-      stop: options.stopSequences,
+      // Only include stop sequences if model supports them and they're provided
+      ...(supportsStop && options.stopSequences && options.stopSequences.length > 0 && { stop: options.stopSequences }),
       ...(tools && { tools }),
     };
 
