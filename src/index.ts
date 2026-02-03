@@ -133,16 +133,13 @@ function getSWEPreset(modelId: string): SWEPreset {
     return { ...basePreset, supportsReasoning: false };
   }
 
-  // Cohere reasoning models (command-a-reasoning-*) support thinking via thinkingBudgetTokens
+  // Cohere reasoning models (command-a-reasoning-*) support thinking via thinkingBudgetTokens (not reasoningEffort)
   if (modelId.includes('reasoning')) {
     return { ...basePreset, supportsReasoning: true };
   }
 
-  // Gemini Flash models with explicit reasoningEffort configuration support reasoning
-  // (Pro and Flash-Lite do not support reasoningEffort parameter)
-  if (modelId === 'google.gemini-2.5-flash') {
-    return { ...basePreset, supportsReasoning: true };
-  }
+  // Note: Google Gemini models do NOT support reasoningEffort parameter in OCI GenAI
+  // Even though Gemini 2.5 Flash has reasoning capabilities, OCI doesn't expose the parameter
 
   // Note: Meta Llama 4 models do NOT support reasoningEffort parameter in OCI
   // They may have internal reasoning but don't expose API control for it
