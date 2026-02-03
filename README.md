@@ -2,6 +2,8 @@
 
 OCI GenAI provider for [OpenCode](https://opencode.ai) with interactive setup wizard.
 
+> **⚠️ Independent Community Project** — This project has **no official affiliation** with Oracle Corporation or the OpenCode team. It is a community-built integration that enables OpenCode to work with OCI GenAI services.
+
 ## Quick Start
 
 ### 1. Run Setup Wizard
