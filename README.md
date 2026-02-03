@@ -1,6 +1,28 @@
-# opencode-oci-provider
+<div align="center">
 
-OCI GenAI provider for [OpenCode](https://opencode.ai) with interactive setup wizard.
+```
+ ██████╗ ██████╗ ███████╗███╗   ██╗ ██████╗ ██████╗ ██████╗ ███████╗
+██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔════╝██╔═══██╗██╔══██╗██╔════╝
+██║   ██║██████╔╝█████╗  ██╔██╗ ██║██║     ██║   ██║██║  ██║█████╗
+██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║   ██║██║  ██║██╔══╝
+╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗╚██████╔╝██████╔╝███████╗
+ ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝
+ ██████╗  ██████╗██╗    ██████╗ ██████╗  ██████╗ ██╗   ██╗██╗██████╗ ███████╗██████╗
+██╔═══██╗██╔════╝██║    ██╔══██╗██╔══██╗██╔═══██╗██║   ██║██║██╔══██╗██╔════╝██╔══██╗
+██║   ██║██║     ██║    ██████╔╝██████╔╝██║   ██║██║   ██║██║██║  ██║█████╗  ██████╔╝
+██║   ██║██║     ██║    ██╔═══╝ ██╔══██╗██║   ██║╚██╗ ██╔╝██║██║  ██║██╔══╝  ██╔══██╗
+╚██████╔╝╚██████╗██║    ██║     ██║  ██║╚██████╔╝ ╚████╔╝ ██║██████╔╝███████╗██║  ██║
+ ╚═════╝  ╚═════╝╚═╝    ╚═╝     ╚═╝  ╚═╝ ╚═════╝   ╚═══╝  ╚═╝╚═════╝ ╚══════╝╚═╝  ╚═╝
+```
+
+**OCI GenAI provider for OpenCode with interactive setup wizard**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![OpenCode Compatible](https://img.shields.io/badge/OpenCode-Compatible-blue)](https://opencode.ai)
+[![Node 18+](https://img.shields.io/badge/Node-18%2B-brightgreen)](https://nodejs.org)
+[![Community Project](https://img.shields.io/badge/Community-Maintained-success)](https://github.com/acedergren/opencode-oci-provider)
+
+</div>
 
 > **⚠️ Independent Community Project** — This project has **no official affiliation** with Oracle Corporation or the OpenCode team. It is a community-built integration that enables OpenCode to work with OCI GenAI services.
 
