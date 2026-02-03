@@ -77,7 +77,7 @@
           "name": "Llama 3.3 70B",
           "limit": { "context": 131072, "output": 8192 }
         },
-        "meta.llama-4-maverick-17b-128e-instruct": {
+        "meta.llama-4-maverick-17b-128e-instruct-fp8": {
           "name": "Llama 4 Maverick",
           "limit": { "context": 1048576, "output": 8192 }
         },
