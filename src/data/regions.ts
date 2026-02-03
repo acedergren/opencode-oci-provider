@@ -173,7 +173,7 @@ export function getAllRegionIds(): string[] {
  * Check if a model requires a dedicated AI cluster
  */
 export function isDedicatedOnly(modelId: string): boolean {
-  return DEDICATED_ONLY_MODELS.includes(modelId);
+  return DEDICATED_ONLY_MODELS.some(prefix => modelId.startsWith(prefix));
 }
 
 /**
