@@ -58,7 +58,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsReasoning: false,  // Only reasoning models support thinking (see getSWEPreset)
   },
   // Google Gemini - excellent for code (OCI does NOT support frequencyPenalty/presencePenalty)
-  // Gemini 2.5 Pro has thinking enabled by default (cannot be turned off)
+  // Only Gemini Flash with explicit reasoningEffort config supports reasoning parameter
   'google': {
     temperature: 0.1,
     topP: 0.95,
@@ -66,7 +66,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     presencePenalty: 0,
     supportsTools: true,
     supportsPenalties: false,
-    supportsReasoning: true,  // Gemini 2.5 Pro has thinking always enabled
+    supportsReasoning: false,  // Only Flash variants with explicit config support reasoningEffort
   },
   // xAI Grok - supports tools, but NOT frequencyPenalty/presencePenalty, stop sequences, or reasoning_effort
   // Note: OCI docs suggest reasoning_effort is available, but Grok models throw:
@@ -133,15 +133,19 @@ function getSWEPreset(modelId: string): SWEPreset {
     return { ...basePreset, supportsReasoning: false };
   }
 
-  // Cohere reasoning models (command-a-reasoning-*) support thinking
+  // Cohere reasoning models (command-a-reasoning-*) support thinking via thinkingBudgetTokens
   if (modelId.includes('reasoning')) {
     return { ...basePreset, supportsReasoning: true };
   }
 
-  // Meta Llama 4 models (maverick, scout) support reasoning
-  if (modelId.includes('llama-4')) {
+  // Gemini Flash models with explicit reasoningEffort configuration support reasoning
+  // (Pro and Flash-Lite do not support reasoningEffort parameter)
+  if (modelId === 'google.gemini-2.5-flash') {
     return { ...basePreset, supportsReasoning: true };
   }
+
+  // Note: Meta Llama 4 models do NOT support reasoningEffort parameter in OCI
+  // They may have internal reasoning but don't expose API control for it
 
   return basePreset;
 }
