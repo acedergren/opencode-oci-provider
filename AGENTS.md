@@ -68,7 +68,37 @@ Llama and xAI/Grok models reject the `TOOL` role and `TOOL_CALL` content type in
 [Tool result from "bash": file1.txt\nfile2.txt]
 ```
 
-This conversion is handled in `convertMessagesToGenericFormat()` (~line 961) with `isLlama` and `isXAI` checks.
+This conversion is handled in `convertMessagesToGenericFormat()` (~line 1988) with `isLlama` and `isXAI` checks.
+
+## Gemini Tool Handling
+
+Gemini (Google) models require a specific message format for tool calls that differs from both the generic format and Llama/xAI:
+
+**AssistantMessage with tool calls:**
+- Tool calls go in a `toolCalls` array at the message level (NOT as `TOOL_CALL` content type inside `content`)
+- `content` should be `null` or contain only TEXT parts
+```json
+{
+  "role": "ASSISTANT",
+  "content": null,
+  "toolCalls": [
+    { "type": "FUNCTION", "id": "call_1", "name": "bash", "arguments": "{\"command\":\"ls\"}" }
+  ]
+}
+```
+
+**ToolMessage (tool result):**
+- Uses `toolCallId` at message level (NOT as content field)
+- Uses regular TEXT content (NOT `FUNCTION_RESPONSE`)
+```json
+{
+  "role": "TOOL",
+  "toolCallId": "call_1",
+  "content": [{ "type": "TEXT", "text": "{\"result\":\"file1.txt\"}" }]
+}
+```
+
+This is handled in `convertMessagesToGenericFormat()` (~line 1988) with `isGoogle` checks.
 
 ## Debugging
 

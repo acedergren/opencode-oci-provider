@@ -153,10 +153,20 @@ function getSWEPreset(modelId: string): SWEPreset {
   return basePreset;
 }
 
-type ModelFamily = 'cohere' | 'generic';
+type ModelFamily = 'cohere' | 'cohere-v2' | 'generic';
 
+/**
+ * Determine which API format to use for a model.
+ * - cohere-v2: Command A models require COHEREV2 format
+ * - cohere: Legacy Command R/R+ models use COHERE format
+ * - generic: All other models (Gemini, Llama, Grok) use GENERIC format
+ */
 function getModelFamily(modelId: string): ModelFamily {
   if (modelId.startsWith('cohere.')) {
+    // Command A models require V2 API format
+    if (modelId.includes('command-a')) {
+      return 'cohere-v2';
+    }
     return 'cohere';
   }
   return 'generic';
@@ -308,6 +318,712 @@ function jsonSchemaToCohereparams(schema: JSONSchema7): Record<string, any> {
   return params;
 }
 
+/**
+ * Parse SSE (Server-Sent Events) stream from OCI GenAI
+ * OCI returns text/event-stream format when isStream: true
+ */
+async function handleSSEStream(
+  sseStream: ReadableStream<Uint8Array>,
+  controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>,
+  modelFamily: string,
+  swePreset: { supportsReasoning?: boolean },
+  textId: string,
+  reasoningId: string
+): Promise<void> {
+  const reader = sseStream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  
+  // State tracking
+  let textStarted = false;
+  let reasoningStarted = false;
+  let finishReason: LanguageModelV2FinishReason = 'stop';
+  let promptTokens = 0;
+  let completionTokens = 0;
+  const toolCalls: Map<string, { toolName: string; input: string }> = new Map();
+  const toolCallsStarted: Set<string> = new Set();
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      // Parse SSE events from buffer
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6).trim();
+          if (!data || data === '[DONE]') continue;
+
+          try {
+            const event = JSON.parse(data);
+
+            if (process.env.OCI_DEBUG) {
+              console.error('[OCI Debug SSE Event]', JSON.stringify(event, null, 2));
+            }
+
+            // Handle different event types based on model family
+            if (modelFamily === 'cohere-v2' || modelFamily === 'cohere') {
+              await handleCohereSSEEvent(
+                event,
+                controller,
+                { textId, reasoningId, textStarted, reasoningStarted, toolCalls, toolCallsStarted },
+                (updates) => {
+                  if (updates.textStarted !== undefined) textStarted = updates.textStarted;
+                  if (updates.reasoningStarted !== undefined) reasoningStarted = updates.reasoningStarted;
+                  if (updates.finishReason !== undefined) finishReason = updates.finishReason;
+                  if (updates.promptTokens !== undefined) promptTokens = updates.promptTokens;
+                  if (updates.completionTokens !== undefined) completionTokens = updates.completionTokens;
+                }
+              );
+            } else {
+              // Generic/Gemini format
+              await handleGenericSSEEvent(
+                event,
+                controller,
+                { textId, reasoningId, textStarted, reasoningStarted, toolCalls, toolCallsStarted },
+                swePreset,
+                (updates) => {
+                  if (updates.textStarted !== undefined) textStarted = updates.textStarted;
+                  if (updates.reasoningStarted !== undefined) reasoningStarted = updates.reasoningStarted;
+                  if (updates.finishReason !== undefined) finishReason = updates.finishReason;
+                  if (updates.promptTokens !== undefined) promptTokens = updates.promptTokens;
+                  if (updates.completionTokens !== undefined) completionTokens = updates.completionTokens;
+                }
+              );
+            }
+          } catch (parseError) {
+            if (process.env.OCI_DEBUG) {
+              console.error('[OCI Debug SSE Parse Error]', parseError, 'Data:', data);
+            }
+          }
+        }
+      }
+    }
+
+    // End any open streams
+    if (textStarted) {
+      controller.enqueue({ type: 'text-end', id: textId });
+    }
+    if (reasoningStarted) {
+      controller.enqueue({ type: 'reasoning-end', id: reasoningId });
+    }
+
+    // Emit completed tool calls
+    for (const [toolCallId, { toolName, input }] of toolCalls) {
+      if (!toolCallsStarted.has(toolCallId)) {
+        controller.enqueue({ type: 'tool-input-start', id: toolCallId, toolName });
+      }
+      controller.enqueue({ type: 'tool-input-end', id: toolCallId });
+      controller.enqueue({
+        type: 'tool-call',
+        toolCallId,
+        toolName,
+        input,
+      });
+    }
+
+    // Determine final finish reason
+    if (toolCalls.size > 0) {
+      finishReason = 'tool-calls';
+    }
+
+    controller.enqueue({
+      type: 'finish',
+      finishReason,
+      usage: createUsage(promptTokens, completionTokens),
+    });
+    controller.close();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/**
+ * Handle Cohere-specific SSE events
+ * OCI Cohere V2 streaming uses a direct message.content format rather than event types
+ * Format: { apiFormat: "COHEREV2", message: { role: "ASSISTANT", content: [{ type: "TEXT", text: "..." }] } }
+ */
+async function handleCohereSSEEvent(
+  event: any,
+  controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>,
+  state: {
+    textId: string;
+    reasoningId: string;
+    textStarted: boolean;
+    reasoningStarted: boolean;
+    toolCalls: Map<string, { toolName: string; input: string }>;
+    toolCallsStarted: Set<string>;
+  },
+  updateState: (updates: {
+    textStarted?: boolean;
+    reasoningStarted?: boolean;
+    finishReason?: LanguageModelV2FinishReason;
+    promptTokens?: number;
+    completionTokens?: number;
+  }) => void
+): Promise<void> {
+  const eventType = event.type || event.eventType;
+
+  // OCI Cohere V2 streaming format: direct message content without event types
+  // Each SSE chunk contains: { message: { content: [{ type: "TEXT", text: "..." }] } }
+  if (event.message?.content && Array.isArray(event.message.content)) {
+    for (const contentPart of event.message.content) {
+      if (contentPart.type === 'TEXT' && contentPart.text) {
+        if (!state.textStarted) {
+          controller.enqueue({ type: 'text-start', id: state.textId });
+          updateState({ textStarted: true });
+        }
+        controller.enqueue({ type: 'text-delta', id: state.textId, delta: contentPart.text });
+      }
+      // Handle tool calls in streaming format
+      if (contentPart.type === 'TOOL_CALL') {
+        const toolId = contentPart.id || generateId();
+        const toolName = contentPart.name || contentPart.function?.name || '';
+        const input = JSON.stringify(contentPart.parameters || contentPart.function?.arguments || {});
+        
+        if (!state.toolCalls.has(toolId)) {
+          state.toolCalls.set(toolId, { toolName, input });
+          state.toolCallsStarted.add(toolId);
+          controller.enqueue({ type: 'tool-input-start', id: toolId, toolName });
+          controller.enqueue({ type: 'tool-input-delta', id: toolId, delta: input });
+        }
+      }
+    }
+  }
+  
+  // Handle tool calls from message.toolCalls array
+  if (event.message?.toolCalls && Array.isArray(event.message.toolCalls)) {
+    for (const tc of event.message.toolCalls) {
+      const toolId = tc.id || generateId();
+      const toolName = tc.name || tc.function?.name || '';
+      const input = JSON.stringify(tc.parameters || tc.function?.arguments || {});
+      
+      if (!state.toolCalls.has(toolId)) {
+        state.toolCalls.set(toolId, { toolName, input });
+        state.toolCallsStarted.add(toolId);
+        controller.enqueue({ type: 'tool-input-start', id: toolId, toolName });
+        controller.enqueue({ type: 'tool-input-delta', id: toolId, delta: input });
+      }
+    }
+  }
+
+  // Handle usage in streaming events
+  if (event.usage) {
+    updateState({
+      promptTokens: event.usage.inputTokens || event.usage.promptTokens || event.usage.billed_units?.input_tokens,
+      completionTokens: event.usage.outputTokens || event.usage.completionTokens || event.usage.billed_units?.output_tokens,
+    });
+  }
+
+  // Handle finish reason
+  if (event.finishReason) {
+    updateState({ finishReason: mapFinishReason(event.finishReason) });
+  }
+
+  // Also handle explicit event type format (fallback for other Cohere formats)
+  switch (eventType) {
+    case 'message-start':
+      // Message start event - nothing to emit yet
+      break;
+
+    case 'content-start':
+      // Content is starting
+      if (!state.textStarted) {
+        controller.enqueue({ type: 'text-start', id: state.textId });
+        updateState({ textStarted: true });
+      }
+      break;
+
+    case 'content-delta':
+      // Text content delta
+      const textDelta = event.delta?.message?.content?.text ||
+                       event.delta?.text ||
+                       event.text;
+      if (textDelta) {
+        if (!state.textStarted) {
+          controller.enqueue({ type: 'text-start', id: state.textId });
+          updateState({ textStarted: true });
+        }
+        controller.enqueue({ type: 'text-delta', id: state.textId, delta: textDelta });
+      }
+      break;
+
+    case 'content-end':
+      if (state.textStarted) {
+        controller.enqueue({ type: 'text-end', id: state.textId });
+        updateState({ textStarted: false });
+      }
+      break;
+
+    case 'thinking-start':
+    case 'reasoning-start':
+      if (!state.reasoningStarted) {
+        controller.enqueue({ type: 'reasoning-start', id: state.reasoningId });
+        updateState({ reasoningStarted: true });
+      }
+      break;
+
+    case 'thinking-delta':
+    case 'reasoning-delta':
+      const thinkingDelta = event.delta?.thinking || event.delta?.text || event.thinking;
+      if (thinkingDelta) {
+        if (!state.reasoningStarted) {
+          controller.enqueue({ type: 'reasoning-start', id: state.reasoningId });
+          updateState({ reasoningStarted: true });
+        }
+        controller.enqueue({ type: 'reasoning-delta', id: state.reasoningId, delta: thinkingDelta });
+      }
+      break;
+
+    case 'thinking-end':
+    case 'reasoning-end':
+      if (state.reasoningStarted) {
+        controller.enqueue({ type: 'reasoning-end', id: state.reasoningId });
+        updateState({ reasoningStarted: false });
+      }
+      break;
+
+    case 'tool-plan-delta':
+      // Tool plan is reasoning about tool usage
+      const planDelta = event.delta?.message?.tool_plan || event.delta?.tool_plan;
+      if (planDelta) {
+        if (!state.reasoningStarted) {
+          controller.enqueue({ type: 'reasoning-start', id: state.reasoningId });
+          updateState({ reasoningStarted: true });
+        }
+        controller.enqueue({ type: 'reasoning-delta', id: state.reasoningId, delta: planDelta });
+      }
+      break;
+
+    case 'tool-call-start':
+      // Tool call starting
+      const toolCallData = event.delta?.message?.tool_calls || event.delta?.tool_calls;
+      if (toolCallData) {
+        const toolId = toolCallData.id || generateId();
+        const toolName = toolCallData.function?.name || toolCallData.name || '';
+        state.toolCalls.set(toolId, { toolName, input: '' });
+        state.toolCallsStarted.add(toolId);
+        controller.enqueue({ type: 'tool-input-start', id: toolId, toolName });
+      }
+      break;
+
+    case 'tool-call-delta':
+      // Tool call argument streaming
+      const argsDelta = event.delta?.message?.tool_calls?.function?.arguments ||
+                       event.delta?.tool_calls?.function?.arguments ||
+                       event.delta?.arguments;
+      if (argsDelta) {
+        // Find the current tool call being built
+        const currentToolId = Array.from(state.toolCalls.keys()).pop();
+        if (currentToolId) {
+          const tc = state.toolCalls.get(currentToolId);
+          if (tc) {
+            tc.input += argsDelta;
+            controller.enqueue({ type: 'tool-input-delta', id: currentToolId, delta: argsDelta });
+          }
+        }
+      }
+      break;
+
+    case 'tool-call-end':
+      // Tool call completed - don't emit full tool-call yet, wait for message-end
+      break;
+
+    case 'message-end':
+      // Extract usage and finish reason
+      const usage = event.delta?.usage || event.usage;
+      if (usage) {
+        updateState({
+          promptTokens: usage.billed_units?.input_tokens || usage.inputTokens || usage.promptTokens,
+          completionTokens: usage.billed_units?.output_tokens || usage.outputTokens || usage.completionTokens,
+        });
+      }
+      const reason = event.delta?.finish_reason || event.finish_reason || event.finishReason;
+      if (reason) {
+        updateState({ finishReason: mapFinishReason(reason) });
+      }
+      break;
+
+    default:
+      // Handle nested response structure (some events have response object)
+      if (event.response || event.chatResponse) {
+        const resp = event.response || event.chatResponse;
+        // Check for text in response
+        if (resp.text && !state.textStarted) {
+          controller.enqueue({ type: 'text-start', id: state.textId });
+          updateState({ textStarted: true });
+          controller.enqueue({ type: 'text-delta', id: state.textId, delta: resp.text });
+        }
+        // Check for tool calls in response
+        if (resp.toolCalls) {
+          for (const tc of resp.toolCalls) {
+            const toolId = tc.id || generateId();
+            const toolName = tc.name || tc.function?.name || '';
+            const input = JSON.stringify(tc.parameters || tc.function?.arguments || {});
+            state.toolCalls.set(toolId, { toolName, input });
+          }
+        }
+        // Check for finish reason
+        if (resp.finishReason) {
+          updateState({ finishReason: mapFinishReason(resp.finishReason) });
+        }
+      }
+  }
+}
+
+/**
+ * Handle Generic/Gemini SSE events
+ * OCI Generic format also uses message.content[] structure similar to Cohere V2
+ */
+async function handleGenericSSEEvent(
+  event: any,
+  controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>,
+  state: {
+    textId: string;
+    reasoningId: string;
+    textStarted: boolean;
+    reasoningStarted: boolean;
+    toolCalls: Map<string, { toolName: string; input: string }>;
+    toolCallsStarted: Set<string>;
+  },
+  swePreset: { supportsReasoning?: boolean },
+  updateState: (updates: {
+    textStarted?: boolean;
+    reasoningStarted?: boolean;
+    finishReason?: LanguageModelV2FinishReason;
+    promptTokens?: number;
+    completionTokens?: number;
+  }) => void
+): Promise<void> {
+  // OCI Generic/Gemini format: direct message content (same as Cohere V2)
+  // Format: { message: { role: "ASSISTANT", content: [{ type: "TEXT", text: "..." }] } }
+  if (event.message?.content && Array.isArray(event.message.content)) {
+    for (const contentPart of event.message.content) {
+      if (contentPart.type === 'TEXT' && contentPart.text) {
+        if (!state.textStarted) {
+          controller.enqueue({ type: 'text-start', id: state.textId });
+          updateState({ textStarted: true });
+        }
+        controller.enqueue({ type: 'text-delta', id: state.textId, delta: contentPart.text });
+      }
+      // Handle tool calls in streaming format
+      if (contentPart.type === 'TOOL_CALL' || contentPart.type === 'FUNCTION_CALL') {
+        const toolId = contentPart.id || generateId();
+        const toolName = contentPart.name || contentPart.function?.name || '';
+        const input = JSON.stringify(contentPart.parameters || contentPart.args || contentPart.function?.arguments || {});
+        
+        if (!state.toolCalls.has(toolId)) {
+          state.toolCalls.set(toolId, { toolName, input });
+          state.toolCallsStarted.add(toolId);
+          controller.enqueue({ type: 'tool-input-start', id: toolId, toolName });
+          controller.enqueue({ type: 'tool-input-delta', id: toolId, delta: input });
+        }
+      }
+    }
+  }
+
+  // Handle finish reason at event level
+  if (event.finishReason) {
+    updateState({ finishReason: mapFinishReason(event.finishReason) });
+  }
+
+  // Handle usage at event level
+  if (event.usage) {
+    updateState({
+      promptTokens: event.usage.promptTokens || event.usage.inputTokens || event.usage.prompt_tokens,
+      completionTokens: event.usage.completionTokens || event.usage.outputTokens || event.usage.completion_tokens,
+    });
+  }
+
+  // Also handle standard OpenAI-style choices array format (fallback)
+  const choices = event.choices || (event.chatResponse?.choices);
+  if (choices && choices.length > 0) {
+    const choice = choices[0];
+    const delta = choice.delta || choice.message;
+
+    // Text content
+    if (delta?.content) {
+      if (Array.isArray(delta.content)) {
+        for (const part of delta.content) {
+          if (part.type === 'TEXT' && part.text) {
+            if (!state.textStarted) {
+              controller.enqueue({ type: 'text-start', id: state.textId });
+              updateState({ textStarted: true });
+            }
+            controller.enqueue({ type: 'text-delta', id: state.textId, delta: part.text });
+          }
+        }
+      } else if (typeof delta.content === 'string') {
+        if (!state.textStarted) {
+          controller.enqueue({ type: 'text-start', id: state.textId });
+          updateState({ textStarted: true });
+        }
+        controller.enqueue({ type: 'text-delta', id: state.textId, delta: delta.content });
+      }
+    }
+
+    // Reasoning content
+    if (delta?.reasoningContent && swePreset.supportsReasoning) {
+      if (!state.reasoningStarted) {
+        controller.enqueue({ type: 'reasoning-start', id: state.reasoningId });
+        updateState({ reasoningStarted: true });
+      }
+      controller.enqueue({ type: 'reasoning-delta', id: state.reasoningId, delta: delta.reasoningContent });
+    }
+
+    // Tool calls
+    const toolCalls = delta?.tool_calls || delta?.toolCalls || delta?.function_call;
+    if (toolCalls) {
+      const calls = Array.isArray(toolCalls) ? toolCalls : [toolCalls];
+      for (const tc of calls) {
+        const toolId = tc.id || tc.index?.toString() || generateId();
+        const funcCall = tc.function || tc;
+        const toolName = funcCall.name || tc.name;
+
+        if (!state.toolCalls.has(toolId)) {
+          state.toolCalls.set(toolId, { toolName: toolName || '', input: '' });
+        }
+
+        // Stream arguments
+        const args = funcCall.arguments;
+        if (args) {
+          const existing = state.toolCalls.get(toolId)!;
+          if (!state.toolCallsStarted.has(toolId)) {
+            state.toolCallsStarted.add(toolId);
+            controller.enqueue({ type: 'tool-input-start', id: toolId, toolName: existing.toolName || toolName });
+          }
+          existing.input += args;
+          controller.enqueue({ type: 'tool-input-delta', id: toolId, delta: args });
+        }
+      }
+    }
+
+    // Finish reason
+    if (choice.finish_reason || choice.finishReason) {
+      updateState({ finishReason: mapFinishReason(choice.finish_reason || choice.finishReason) });
+    }
+  }
+
+  // Usage info
+  const usage = event.usage || event.chatResponse?.usage;
+  if (usage) {
+    updateState({
+      promptTokens: usage.prompt_tokens || usage.promptTokens || usage.inputTokens,
+      completionTokens: usage.completion_tokens || usage.completionTokens || usage.outputTokens,
+    });
+  }
+}
+
+/**
+ * Handle non-streaming response by simulating streaming output
+ * Used as fallback when true streaming is not available
+ */
+async function handleNonStreamingResponse(
+  chatResult: any,
+  controller: ReadableStreamDefaultController<LanguageModelV2StreamPart>,
+  modelFamily: string,
+  swePreset: { supportsReasoning?: boolean },
+  textId: string,
+  reasoningId: string
+): Promise<void> {
+  let text = '';
+  let reasoningContent = '';
+  let finishReason: LanguageModelV2FinishReason;
+  let promptTokens = 0;
+  let completionTokens = 0;
+  const toolCalls: LanguageModelV2ToolCall[] = [];
+
+  if (process.env.OCI_DEBUG) {
+    console.error('[OCI Debug] Non-streaming Chat Result:', JSON.stringify(chatResult, null, 2));
+    console.error('[OCI Debug] Model Family:', modelFamily);
+  }
+
+  if (modelFamily === 'cohere-v2') {
+    const v2Response = chatResult?.chatResponse as any;
+    const message = v2Response?.message;
+
+    if (message?.content && Array.isArray(message.content)) {
+      for (const part of message.content) {
+        const partType = (part.type || '').toUpperCase();
+        if (partType === 'TEXT' && part.text) {
+          text += part.text;
+        } else if (partType === 'THINKING' && part.thinking) {
+          reasoningContent = part.thinking;
+        }
+      }
+    }
+
+    if (message?.toolCalls && Array.isArray(message.toolCalls)) {
+      for (const toolCall of message.toolCalls) {
+        const funcCall = toolCall.function || toolCall;
+        const args = typeof funcCall.arguments === 'string'
+          ? funcCall.arguments
+          : JSON.stringify(funcCall.arguments || {});
+        toolCalls.push({
+          type: 'tool-call',
+          toolCallId: toolCall.id || generateId(),
+          toolName: funcCall.name || toolCall.name,
+          input: args,
+        });
+      }
+    }
+
+    if (message?.toolPlan && swePreset.supportsReasoning) {
+      reasoningContent = message.toolPlan + (reasoningContent ? '\n' + reasoningContent : '');
+    }
+
+    const hasToolCalls = toolCalls.length > 0;
+    finishReason = hasToolCalls ? 'tool-calls' : mapFinishReason(v2Response?.finishReason);
+
+    const usage = v2Response?.usage;
+    promptTokens = usage?.promptTokens || usage?.inputTokens || 0;
+    completionTokens = usage?.completionTokens || usage?.outputTokens || 0;
+  } else if (modelFamily === 'cohere') {
+    const cohereResponse = chatResult?.chatResponse as any;
+    text = cohereResponse?.text || '';
+
+    const cohereContent = cohereResponse?.content as any[] | undefined;
+    if (cohereContent && Array.isArray(cohereContent)) {
+      for (const part of cohereContent) {
+        if (part.type === 'THINKING' && part.thinking) {
+          reasoningContent = part.thinking;
+        }
+      }
+    }
+
+    const cohereToolCalls = cohereResponse?.toolCalls;
+    if (cohereToolCalls && Array.isArray(cohereToolCalls)) {
+      for (const toolCall of cohereToolCalls) {
+        toolCalls.push({
+          type: 'tool-call',
+          toolCallId: generateId(),
+          toolName: toolCall.name,
+          input: JSON.stringify(toolCall.parameters || {}),
+        });
+      }
+    }
+
+    finishReason = toolCalls.length > 0 ? 'tool-calls' : mapFinishReason(cohereResponse?.finishReason);
+  } else {
+    // Generic format (Gemini, Llama, xAI, etc.)
+    const genericResponse = chatResult?.chatResponse as any;
+    const choice = genericResponse?.choices?.[0];
+    const message = choice?.message;
+
+    if (message?.content && Array.isArray(message.content)) {
+      for (const part of message.content) {
+        const partType = (part.type || '').toUpperCase();
+        if (partType === 'TEXT' && part.text) {
+          text += part.text;
+        } else if (partType === 'TOOL_CALL' || partType === 'FUNCTION_CALL' || part.functionCall) {
+          const toolPart = part as any;
+          const funcCall = toolPart.functionCall || toolPart.function || toolPart;
+          const args = typeof toolPart.arguments === 'string'
+            ? toolPart.arguments
+            : typeof funcCall.arguments === 'string'
+            ? funcCall.arguments
+            : JSON.stringify(toolPart.arguments || funcCall.arguments || funcCall.args || {});
+          toolCalls.push({
+            type: 'tool-call',
+            toolCallId: toolPart.id || funcCall.id || generateId(),
+            toolName: toolPart.name || funcCall.name,
+            input: args,
+          });
+        }
+      }
+    } else if (typeof message?.content === 'string') {
+      text = message.content;
+    } else if (message?.text) {
+      text = message.text;
+    }
+
+    const msgToolCalls = message?.tool_calls || message?.toolCalls || message?.function_call;
+    if (msgToolCalls) {
+      const calls = Array.isArray(msgToolCalls) ? msgToolCalls : [msgToolCalls];
+      for (const tc of calls) {
+        const funcCall = tc.function || tc;
+        const args = typeof funcCall.arguments === 'string'
+          ? funcCall.arguments
+          : JSON.stringify(funcCall.arguments || funcCall.args || {});
+        toolCalls.push({
+          type: 'tool-call',
+          toolCallId: tc.id || generateId(),
+          toolName: funcCall.name || tc.name,
+          input: args,
+        });
+      }
+    }
+
+    if (message?.reasoningContent && swePreset.supportsReasoning) {
+      reasoningContent = message.reasoningContent;
+    }
+
+    finishReason = mapFinishReason(choice?.finishReason);
+    const usageInfo = genericResponse?.usage;
+    promptTokens = usageInfo?.promptTokens || 0;
+    completionTokens = usageInfo?.completionTokens || 0;
+  }
+
+  // Emit reasoning content first (if present)
+  if (reasoningContent) {
+    controller.enqueue({ type: 'reasoning-start', id: reasoningId });
+    const chunkSize = 50;
+    for (let i = 0; i < reasoningContent.length; i += chunkSize) {
+      controller.enqueue({
+        type: 'reasoning-delta',
+        id: reasoningId,
+        delta: reasoningContent.slice(i, i + chunkSize),
+      });
+    }
+    controller.enqueue({ type: 'reasoning-end', id: reasoningId });
+  }
+
+  // Emit text content
+  if (text) {
+    controller.enqueue({ type: 'text-start', id: textId });
+    const chunkSize = 50;
+    for (let i = 0; i < text.length; i += chunkSize) {
+      controller.enqueue({
+        type: 'text-delta',
+        id: textId,
+        delta: text.slice(i, i + chunkSize),
+      });
+    }
+    controller.enqueue({ type: 'text-end', id: textId });
+  }
+
+  // Emit tool calls
+  for (const toolCall of toolCalls) {
+    controller.enqueue({
+      type: 'tool-input-start',
+      id: toolCall.toolCallId,
+      toolName: toolCall.toolName,
+    });
+    controller.enqueue({
+      type: 'tool-input-delta',
+      id: toolCall.toolCallId,
+      delta: toolCall.input,
+    });
+    controller.enqueue({
+      type: 'tool-input-end',
+      id: toolCall.toolCallId,
+    });
+    controller.enqueue(toolCall);
+  }
+
+  controller.enqueue({
+    type: 'finish',
+    finishReason,
+    usage: createUsage(promptTokens, completionTokens),
+  });
+  controller.close();
+}
+
 class OCIChatLanguageModelV2 implements LanguageModelV2 {
   readonly specificationVersion = 'v2' as const;
   readonly supportedUrls: Record<string, RegExp[]> = {};
@@ -380,7 +1096,61 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     let promptTokens = 0;
     let completionTokens = 0;
 
-    if (this.modelFamily === 'cohere') {
+    if (this.modelFamily === 'cohere-v2') {
+      // Cohere V2 response format (CohereChatResponseV2)
+      const v2Response = chatResult?.chatResponse as any;
+      
+      if (process.env.OCI_DEBUG) {
+        console.error('[OCI Debug] Cohere V2 response:', JSON.stringify(v2Response, null, 2));
+      }
+
+      // V2 has response.message which contains content array and toolCalls
+      const message = v2Response?.message;
+      
+      // Extract content from message.content array
+      if (message?.content && Array.isArray(message.content)) {
+        for (const part of message.content) {
+          const partType = (part.type || '').toUpperCase();
+          if (partType === 'TEXT' && part.text) {
+            content.push({ type: 'text', text: part.text } as LanguageModelV2Text);
+          } else if (partType === 'THINKING' && part.thinking) {
+            content.push({ type: 'reasoning', text: part.thinking } as LanguageModelV2Reasoning);
+          }
+        }
+      }
+
+      // Extract tool calls from message.toolCalls (CohereToolCallV2 format)
+      if (message?.toolCalls && Array.isArray(message.toolCalls)) {
+        for (const toolCall of message.toolCalls) {
+          // V2 format: { id, type: 'FUNCTION', function: { name, arguments } }
+          const funcCall = toolCall.function || toolCall;
+          const args = typeof funcCall.arguments === 'string'
+            ? funcCall.arguments
+            : JSON.stringify(funcCall.arguments || {});
+          
+          content.push({
+            type: 'tool-call',
+            toolCallId: toolCall.id || generateId(),
+            toolName: funcCall.name || toolCall.name,
+            input: args,
+          } as LanguageModelV2ToolCall);
+        }
+      }
+
+      // toolPlan contains the model's reasoning about tool usage
+      if (message?.toolPlan && this.swePreset.supportsReasoning) {
+        content.unshift({ type: 'reasoning', text: message.toolPlan } as LanguageModelV2Reasoning);
+      }
+
+      // finishReason is at the response level in V2
+      const hasToolCalls = message?.toolCalls && message.toolCalls.length > 0;
+      finishReason = hasToolCalls ? 'tool-calls' : mapFinishReason(v2Response?.finishReason);
+
+      // Usage info
+      const usage = v2Response?.usage;
+      promptTokens = usage?.promptTokens || usage?.inputTokens || 0;
+      completionTokens = usage?.completionTokens || usage?.outputTokens || 0;
+    } else if (this.modelFamily === 'cohere') {
       const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
       const text = cohereResponse?.text || '';
 
@@ -493,7 +1263,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     stream: ReadableStream<LanguageModelV2StreamPart>;
   }> {
     const servingMode = this.getServingMode();
-    const chatRequest = this.buildChatRequest(options);
+    const chatRequest = this.buildStreamingChatRequest(options);
 
     // Debug logging
     if (process.env.OCI_DEBUG) {
@@ -526,6 +1296,21 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
           const response = await client.chat({ chatDetails });
 
+          // Check if we got a streaming response (ReadableStream) or a non-streaming response
+          if (response && typeof (response as any).getReader === 'function') {
+            // True streaming response - parse SSE events
+            await handleSSEStream(
+              response as ReadableStream<Uint8Array>,
+              controller,
+              modelFamily,
+              swePreset,
+              textId,
+              reasoningId
+            );
+            return;
+          }
+
+          // Non-streaming fallback (shouldn't happen with isStream: true, but handle gracefully)
           if (!response || !('chatResult' in response)) {
             controller.enqueue({
               type: 'error',
@@ -535,188 +1320,16 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             return;
           }
 
-          const chatResult = response.chatResult;
-          let text = '';
-          let reasoningContent = '';
-          let finishReason: LanguageModelV2FinishReason;
-          let promptTokens = 0;
-          let completionTokens = 0;
-          const toolCalls: LanguageModelV2ToolCall[] = [];
-
-          // Debug: log the full response structure
-          if (process.env.OCI_DEBUG) {
-            console.error('[OCI Debug] Chat Result:', JSON.stringify(chatResult, null, 2));
-            console.error('[OCI Debug] Model Family:', modelFamily);
-          }
-
-          if (modelFamily === 'cohere') {
-            const cohereResponse = chatResult?.chatResponse as oci.models.CohereChatResponse | undefined;
-            text = cohereResponse?.text || '';
-
-            // Extract thinking content from Cohere V2 response (for reasoning models)
-            const cohereContent = (cohereResponse as any)?.content as any[] | undefined;
-            if (cohereContent && Array.isArray(cohereContent)) {
-              for (const part of cohereContent) {
-                if (part.type === 'THINKING' && part.thinking) {
-                  reasoningContent = part.thinking;
-                }
-              }
-            }
-
-            // Handle Cohere tool calls
-            const cohereToolCalls = (cohereResponse as any)?.toolCalls;
-            if (cohereToolCalls && Array.isArray(cohereToolCalls)) {
-              for (const toolCall of cohereToolCalls) {
-                toolCalls.push({
-                  type: 'tool-call',
-                  toolCallId: generateId(),
-                  toolName: toolCall.name,
-                  input: JSON.stringify(toolCall.parameters || {}),
-                });
-              }
-            }
-
-            finishReason = toolCalls.length > 0 ? 'tool-calls' : mapFinishReason(cohereResponse?.finishReason);
-          } else {
-            const genericResponse = chatResult?.chatResponse as oci.models.GenericChatResponse | undefined;
-
-            if (process.env.OCI_DEBUG) {
-              console.error('[OCI Debug] Generic Response:', JSON.stringify(genericResponse, null, 2));
-              console.error('[OCI Debug] Choices:', JSON.stringify(genericResponse?.choices, null, 2));
-            }
-
-            const choice = genericResponse?.choices?.[0];
-            const message = choice?.message as oci.models.AssistantMessage | undefined;
-
-            if (process.env.OCI_DEBUG) {
-              console.error('[OCI Debug] Choice:', JSON.stringify(choice, null, 2));
-              console.error('[OCI Debug] Message:', JSON.stringify(message, null, 2));
-              console.error('[OCI Debug] Message content:', JSON.stringify(message?.content, null, 2));
-            }
-
-            if (message?.content && Array.isArray(message.content)) {
-              for (const part of message.content) {
-                const partType = (part.type || '').toUpperCase();
-                if (partType === 'TEXT') {
-                  const textPart = part as oci.models.TextContent;
-                  // Only add text if it exists (Gemini may return empty TEXT objects with tool calls)
-                  if (textPart.text) {
-                    text += textPart.text;
-                  }
-                } else if (partType === 'TOOL_CALL' || partType === 'FUNCTION_CALL' || (part as any).functionCall) {
-                  const toolPart = part as any;
-                  // Handle various tool call formats (OCI generic, Gemini function_call)
-                  const funcCall = toolPart.functionCall || toolPart.function || toolPart;
-                  const args = typeof toolPart.arguments === 'string'
-                    ? toolPart.arguments
-                    : typeof funcCall.arguments === 'string'
-                    ? funcCall.arguments
-                    : JSON.stringify(toolPart.arguments || funcCall.arguments || funcCall.args || {});
-                  toolCalls.push({
-                    type: 'tool-call',
-                    toolCallId: toolPart.id || funcCall.id || generateId(),
-                    toolName: toolPart.name || funcCall.name,
-                    input: args,
-                  });
-                }
-              }
-            } else if (typeof message?.content === 'string') {
-              // Fallback: message.content is a string directly
-              text = message.content;
-            } else if ((message as any)?.text) {
-              // Fallback: message has a text property directly
-              text = (message as any).text;
-            }
-
-            // Also check for tool_calls at the message level (some models put them there)
-            const msgToolCalls = (message as any)?.tool_calls || (message as any)?.toolCalls || (message as any)?.function_call;
-            if (msgToolCalls) {
-              const calls = Array.isArray(msgToolCalls) ? msgToolCalls : [msgToolCalls];
-              for (const tc of calls) {
-                const funcCall = tc.function || tc;
-                const args = typeof funcCall.arguments === 'string'
-                  ? funcCall.arguments
-                  : JSON.stringify(funcCall.arguments || funcCall.args || {});
-                toolCalls.push({
-                  type: 'tool-call',
-                  toolCallId: tc.id || generateId(),
-                  toolName: funcCall.name || tc.name,
-                  input: args,
-                });
-              }
-            }
-
-            // Extract reasoning content if present
-            if ((message as any)?.reasoningContent && swePreset.supportsReasoning) {
-              reasoningContent = (message as any).reasoningContent;
-            }
-
-            finishReason = mapFinishReason(choice?.finishReason);
-            const usageInfo = genericResponse?.usage;
-            promptTokens = usageInfo?.promptTokens || 0;
-            completionTokens = usageInfo?.completionTokens || 0;
-          }
-
-          // Emit reasoning content first (if present)
-          if (reasoningContent) {
-            controller.enqueue({ type: 'reasoning-start', id: reasoningId });
-
-            const chunkSize = 50;
-            for (let i = 0; i < reasoningContent.length; i += chunkSize) {
-              controller.enqueue({
-                type: 'reasoning-delta',
-                id: reasoningId,
-                delta: reasoningContent.slice(i, i + chunkSize),
-              });
-            }
-
-            controller.enqueue({ type: 'reasoning-end', id: reasoningId });
-          }
-
-          // Emit text content
-          if (text) {
-            controller.enqueue({ type: 'text-start', id: textId });
-
-            const chunkSize = 50;
-            for (let i = 0; i < text.length; i += chunkSize) {
-              controller.enqueue({
-                type: 'text-delta',
-                id: textId,
-                delta: text.slice(i, i + chunkSize),
-              });
-            }
-
-            controller.enqueue({ type: 'text-end', id: textId });
-          }
-
-          // Emit tool calls using V2 format (tool-input-* events, then full tool-call)
-          // IMPORTANT: The `id` in tool-input-* events must match toolCallId in the final tool-call
-          for (const toolCall of toolCalls) {
-            // Stream tool input using the SAME ID as the final tool-call
-            controller.enqueue({
-              type: 'tool-input-start',
-              id: toolCall.toolCallId,
-              toolName: toolCall.toolName,
-            });
-            controller.enqueue({
-              type: 'tool-input-delta',
-              id: toolCall.toolCallId,
-              delta: toolCall.input,
-            });
-            controller.enqueue({
-              type: 'tool-input-end',
-              id: toolCall.toolCallId,
-            });
-            // Emit complete tool call
-            controller.enqueue(toolCall);
-          }
-
-          controller.enqueue({
-            type: 'finish',
-            finishReason,
-            usage: createUsage(promptTokens, completionTokens),
-          });
-          controller.close();
+          // Handle non-streaming response by simulating streaming
+          const chatResult = (response as any).chatResult;
+          await handleNonStreamingResponse(
+            chatResult,
+            controller,
+            modelFamily,
+            swePreset,
+            textId,
+            reasoningId
+          );
         } catch (error) {
           const parsedError = parseOCIError(error, modelId);
           controller.enqueue({ type: 'error', error: parsedError });
@@ -726,6 +1339,23 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     });
 
     return { stream };
+  }
+
+  /**
+   * Build chat request with streaming enabled
+   */
+  private buildStreamingChatRequest(
+    options: LanguageModelV2CallOptions
+  ): oci.models.CohereChatRequest | oci.models.GenericChatRequest {
+    const baseRequest = this.buildChatRequest(options);
+    // Add streaming flag and options
+    return {
+      ...baseRequest,
+      isStream: true,
+      streamOptions: {
+        isIncludeUsage: true,
+      },
+    } as any;
   }
 
   private getServingMode(): oci.models.OnDemandServingMode | oci.models.DedicatedServingMode {
@@ -741,6 +1371,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
   private buildChatRequest(
     options: LanguageModelV2CallOptions
   ): oci.models.CohereChatRequest | oci.models.GenericChatRequest {
+    if (this.modelFamily === 'cohere-v2') {
+      return this.buildCohereV2ChatRequest(options);
+    }
     if (this.modelFamily === 'cohere') {
       return this.buildCohereChatRequest(options);
     }
@@ -788,6 +1421,65 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         type: 'ENABLED',
         ...(budgetTokens && { budgetTokens }),
       };
+    }
+
+    return request;
+  }
+
+  /**
+   * Build Cohere V2 API request (for Command A models)
+   * V2 uses a messages array format similar to OpenAI/Generic, but with Cohere-specific types
+   */
+  private buildCohereV2ChatRequest(options: LanguageModelV2CallOptions): any {
+    const messages = this.convertMessagesToCohereV2Format(options.prompt);
+
+    // Convert tools to Cohere V2 format (type: FUNCTION, function: {...})
+    const tools = this.swePreset.supportsTools && options.tools
+      ? this.convertToolsToCohereV2(options.tools)
+      : undefined;
+
+    // Map AI SDK toolChoice to Cohere V2 toolsChoice
+    // Cohere V2 supports: 'REQUIRED' | 'NONE'
+    // AI SDK supports: 'auto' | 'none' | 'required' | { type: 'tool', toolName: string }
+    let toolsChoice: 'REQUIRED' | 'NONE' | undefined;
+    if (tools) {
+      const aiToolChoice = options.toolChoice;
+      if (aiToolChoice?.type === 'none') {
+        toolsChoice = 'NONE';
+      } else if (aiToolChoice?.type === 'required' || aiToolChoice?.type === 'tool') {
+        // 'required' and specific tool requests both map to REQUIRED
+        toolsChoice = 'REQUIRED';
+      }
+      // For 'auto' or undefined, don't set toolsChoice - let the model decide
+      // This is important for multi-turn: step 1 may need tools, but step 2
+      // (after receiving tool results) should be free to respond with text
+    }
+
+    const request: any = {
+      apiFormat: 'COHEREV2',
+      messages,
+      maxTokens: options.maxOutputTokens ?? 4096, // Default to 4096 if not specified
+      temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
+      topP: this.applyDefaults(options.topP, this.swePreset.topP),
+      frequencyPenalty: this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty),
+      presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
+      ...(tools && { tools }),
+      ...(toolsChoice && { toolsChoice }),
+    };
+
+    // Add thinking parameter for Cohere reasoning models (Command A Reasoning)
+    if (this.swePreset.supportsReasoning) {
+      const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
+      const budgetTokens = providerOptions?.thinkingBudgetTokens as number | undefined;
+
+      request.thinking = {
+        type: 'ENABLED',
+        ...(budgetTokens && { budgetTokens }),
+      };
+    }
+
+    if (process.env.OCI_DEBUG) {
+      console.error('[OCI Debug] Cohere V2 request:', JSON.stringify(request, null, 2));
     }
 
     return request;
@@ -867,6 +1559,47 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       });
 
     return cohereTools;
+  }
+
+  /**
+   * Convert tools to Cohere V2 format (CohereToolV2)
+   * 
+   * OCI CohereToolV2 format:
+   * { type: 'FUNCTION', function: { name, description, parameters } }
+   */
+  private convertToolsToCohereV2(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
+    if (!tools || tools.length === 0) return undefined;
+
+    return tools
+      .filter((tool): tool is LanguageModelV2FunctionTool => tool.type === 'function')
+      .map(tool => {
+        // Clean the JSON schema for compatibility
+        const cleanedParams = this.cleanJsonSchema(tool.inputSchema);
+        
+        // Ensure parameters has type: 'object' (required by Cohere V2)
+        const parameters = {
+          type: 'object',
+          ...cleanedParams,
+        };
+
+        // Debug: log tool conversion
+        if (process.env.OCI_DEBUG) {
+          console.error('[OCI Debug] Converting tool to Cohere V2:', tool.name);
+          console.error('[OCI Debug] Original schema:', JSON.stringify(tool.inputSchema, null, 2));
+          console.error('[OCI Debug] Final parameters:', JSON.stringify(parameters, null, 2));
+        }
+
+        // OCI CohereToolV2 format (from SDK types):
+        // { type: 'FUNCTION', function: { name, description, parameters } }
+        return {
+          type: 'FUNCTION',
+          function: {
+            name: tool.name,
+            description: tool.description || '',
+            parameters,
+          },
+        };
+      });
   }
 
   private convertTools(tools: LanguageModelV2CallOptions['tools']): any[] | undefined {
@@ -1072,6 +1805,117 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     return { message: lastUserMessage, chatHistory, toolResults };
   }
 
+  /**
+   * Convert messages to Cohere V2 format (CohereMessageV2 array)
+   * V2 uses a messages array with role (SYSTEM, USER, ASSISTANT, TOOL) and content array
+   */
+  private convertMessagesToCohereV2Format(prompt: LanguageModelV2CallOptions['prompt']): any[] {
+    if (!prompt || !Array.isArray(prompt)) {
+      return [];
+    }
+
+    const messages: any[] = [];
+    // Track tool call IDs for matching tool results
+    const toolCallIdMap = new Map<string, string>();
+
+    for (const msg of prompt) {
+      if (msg.role === 'system') {
+        messages.push({
+          role: 'SYSTEM',
+          content: [{ type: 'TEXT', text: msg.content }],
+        });
+      } else if (msg.role === 'user') {
+        const content: any[] = [];
+        for (const part of msg.content) {
+          if (part.type === 'text') {
+            content.push({ type: 'TEXT', text: part.text });
+          }
+          // Note: V2 also supports IMAGE content but we'll keep it simple for now
+        }
+        if (content.length > 0) {
+          messages.push({
+            role: 'USER',
+            content,
+          });
+        }
+      } else if (msg.role === 'assistant') {
+        const content: any[] = [];
+        const toolCalls: any[] = [];
+
+        for (const part of msg.content) {
+          if (part.type === 'text' && part.text) {
+            content.push({ type: 'TEXT', text: part.text });
+          } else if (part.type === 'tool-call') {
+            const toolCallPart = part as any;
+            const toolCallId = toolCallPart.toolCallId || generateId();
+            
+            // Store mapping for tool result matching
+            toolCallIdMap.set(toolCallPart.toolName + '_' + JSON.stringify(toolCallPart.input), toolCallId);
+            
+            toolCalls.push({
+              id: toolCallId,
+              type: 'FUNCTION',
+              function: {
+                name: toolCallPart.toolName,
+                arguments: typeof toolCallPart.input === 'string'
+                  ? toolCallPart.input
+                  : JSON.stringify(toolCallPart.input || {}),
+              },
+            });
+          }
+        }
+
+        // In V2, toolCalls are part of the assistant message, not in content
+        const assistantMsg: any = {
+          role: 'ASSISTANT',
+          content: content.length > 0 ? content : [{ type: 'TEXT', text: '' }],
+        };
+        if (toolCalls.length > 0) {
+          assistantMsg.toolCalls = toolCalls;
+        }
+        messages.push(assistantMsg);
+      } else if (msg.role === 'tool') {
+        // V2 tool messages need toolCallId and content with the result
+        for (const part of msg.content) {
+          if (part.type === 'tool-result') {
+            const toolResultPart = part as any;
+            let resultText: string;
+            const output = toolResultPart.output;
+
+            if (!output) {
+              resultText = '';
+            } else if (typeof output === 'string') {
+              resultText = output;
+            } else if (output.type === 'text' || output.type === 'error-text') {
+              resultText = output.value ?? '';
+            } else if (output.type === 'json') {
+              resultText = JSON.stringify(output.value);
+            } else {
+              resultText = typeof output === 'object' ? JSON.stringify(output) : String(output);
+            }
+
+            // Try to find the tool call ID from our map or use provided one
+            const toolCallId = toolResultPart.toolCallId || 
+              toolCallIdMap.get(toolResultPart.toolName + '_' + JSON.stringify(toolResultPart.input)) ||
+              generateId();
+
+            messages.push({
+              role: 'TOOL',
+              toolCallId,
+              content: [{ type: 'TEXT', text: resultText }],
+            });
+          }
+        }
+      }
+    }
+
+    if (process.env.OCI_DEBUG) {
+      console.error('[OCI Debug] Cohere V2 messages:', JSON.stringify(messages, null, 2));
+    }
+
+    return messages;
+  }
+
   private convertMessagesToGenericFormat(prompt: LanguageModelV2CallOptions['prompt']): oci.models.Message[] {
     if (!prompt || !Array.isArray(prompt)) {
       return [];
@@ -1081,6 +1925,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     const isXAI = this.modelId.startsWith('xai.');
     // Check if this is a Llama model - they also reject TOOL role messages
     const isLlama = this.modelId.startsWith('meta.llama');
+    // Check if this is a Google model - they need FUNCTION_RESPONSE format for tool results
+    const isGoogle = this.modelId.startsWith('google.');
 
     const messages: oci.models.Message[] = [];
 
@@ -1130,6 +1976,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       } else if (role === 'assistant') {
         const content: oci.models.ChatContent[] = [];
         const toolCallTexts: string[] = [];
+        const toolCalls: oci.models.ToolCall[] = []; // For Generic format (Google/Gemini)
 
         for (const part of message.content) {
           if (part.type === 'text') {
@@ -1144,6 +1991,15 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               // These models reject TOOL_CALL content type in message history
               const args = typeof part.input === 'string' ? part.input : JSON.stringify(part.input);
               toolCallTexts.push(`[Called tool "${part.toolName}" with: ${args}]`);
+            } else if (isGoogle) {
+              // For Google/Gemini: Use toolCalls array at message level (not in content)
+              // OCI Generic format expects FunctionCall objects in toolCalls array
+              toolCalls.push({
+                type: 'FUNCTION',
+                id: part.toolCallId,
+                name: part.toolName,
+                arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input),
+              } as oci.models.FunctionCall);
             } else {
               // Handle tool calls in assistant messages (standard format)
               content.push({
@@ -1170,10 +2026,18 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           }
         }
 
-        messages.push({
+        // Build the assistant message
+        const assistantMsg: any = {
           role: 'ASSISTANT',
-          content,
-        } as oci.models.AssistantMessage);
+          content: content.length > 0 ? content : null, // Set to null if no content (per OCI docs)
+        };
+
+        // For Google/Gemini: Add toolCalls array at message level
+        if (isGoogle && toolCalls.length > 0) {
+          assistantMsg.toolCalls = toolCalls;
+        }
+
+        messages.push(assistantMsg as oci.models.AssistantMessage);
       } else if (role === 'tool') {
         // Handle tool result messages
         for (const part of message.content) {
@@ -1208,6 +2072,18 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
                   text: `[Tool result from "${toolName}": ${resultText}]`,
                 } as oci.models.TextContent],
               } as oci.models.UserMessage);
+            } else if (isGoogle) {
+              // For Google/Gemini models: Use standard ToolMessage format
+              // OCI Generic format expects toolCallId at message level with TEXT content
+              const textContent: oci.models.TextContent = {
+                type: oci.models.TextContent.type,
+                text: resultText,
+              };
+              messages.push({
+                role: 'TOOL',
+                toolCallId: part.toolCallId,
+                content: [textContent],
+              } as oci.models.ToolMessage);
             } else {
               const textContent: oci.models.TextContent = {
                 type: oci.models.TextContent.type,

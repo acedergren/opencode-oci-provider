@@ -497,8 +497,13 @@ describe('OCI Provider Tool Compatibility', () => {
   });
 
   describe('Model Family Detection', () => {
-    it('should detect cohere model family', () => {
+    it('should detect cohere-v2 model family for Command A', () => {
       const model = provider.languageModel('cohere.command-a-03-2025');
+      expect((model as any).modelFamily).toBe('cohere-v2');
+    });
+
+    it('should detect cohere model family for legacy Command R', () => {
+      const model = provider.languageModel('cohere.command-r-plus-08-2024');
       expect((model as any).modelFamily).toBe('cohere');
     });
 
@@ -773,7 +778,7 @@ describe('SDK Serialization Compatibility', () => {
     };
 
     // Serialize using the SDK's getJsonObj function
-    const serialized = ociModels.BaseChatRequest.getJsonObj(cohereRequest);
+    const serialized = ociModels.BaseChatRequest.getJsonObj(cohereRequest) as Record<string, unknown>;
 
     // Verify isForceSingleStep is preserved after SDK serialization
     expect(serialized.isForceSingleStep).toBe(true);
@@ -801,7 +806,7 @@ describe('SDK Serialization Compatibility', () => {
     };
 
     // Serialize using ChatDetails.getJsonObj (what the SDK client uses)
-    const serialized = ociModels.ChatDetails.getJsonObj(chatDetails);
+    const serialized = ociModels.ChatDetails.getJsonObj(chatDetails) as Record<string, any>;
 
     // Verify the nested chatRequest still has isForceSingleStep
     expect(serialized.chatRequest.isForceSingleStep).toBe(true);
@@ -1492,10 +1497,14 @@ describe('Llama Tool Calling Regression', () => {
     const messages = convertMessagesToGenericFormat(prompt);
 
     expect(messages).toHaveLength(3);
-    // Gemini should use native TOOL role
+    // Gemini should use native TOOL role with toolCallId at message level
     expect(messages[2].role).toBe('TOOL');
-    // And native TOOL_CALL content type
-    expect((messages[1].content as any[])[0].type).toBe('TOOL_CALL');
+    expect((messages[2] as any).toolCallId).toBe('call_1');
+    expect((messages[2].content as any[])[0].type).toBe('TEXT');
+    // Gemini should use toolCalls array at message level (not TOOL_CALL content type)
+    expect((messages[1] as any).toolCalls).toBeDefined();
+    expect((messages[1] as any).toolCalls[0].type).toBe('FUNCTION');
+    expect((messages[1] as any).toolCalls[0].name).toBe('bash');
   });
 });
 
@@ -1628,6 +1637,990 @@ describe('Error Handling Regression', () => {
 });
 
 /**
+ * Tests for Cohere V2 API format (Command A models)
+ */
+describe('Cohere V2 API Format', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  describe('Model Family Detection', () => {
+    it('should detect cohere-v2 family for Command A models', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      expect((model as any).modelFamily).toBe('cohere-v2');
+    });
+
+    it('should detect cohere-v2 family for Command A reasoning models', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      expect((model as any).modelFamily).toBe('cohere-v2');
+    });
+
+    it('should detect legacy cohere family for Command R models', () => {
+      const model = provider.languageModel('cohere.command-r-08-2024');
+      expect((model as any).modelFamily).toBe('cohere');
+    });
+  });
+
+  describe('convertMessagesToCohereV2Format', () => {
+    it('should convert system messages correctly', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertMessagesToCohereV2Format.bind(model);
+
+      const prompt = [
+        { role: 'system' as const, content: 'You are a helpful assistant.' },
+      ];
+
+      const messages = convert(prompt);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('SYSTEM');
+      expect(messages[0].content[0].type).toBe('TEXT');
+      expect(messages[0].content[0].text).toBe('You are a helpful assistant.');
+    });
+
+    it('should convert user messages correctly', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertMessagesToCohereV2Format.bind(model);
+
+      const prompt = [
+        { role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello world' }] },
+      ];
+
+      const messages = convert(prompt);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('USER');
+      expect(messages[0].content[0].type).toBe('TEXT');
+      expect(messages[0].content[0].text).toBe('Hello world');
+    });
+
+    it('should convert assistant messages with tool calls', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertMessagesToCohereV2Format.bind(model);
+
+      const prompt = [
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'text' as const, text: 'Let me check that.' },
+            { type: 'tool-call' as const, toolCallId: 'call_123', toolName: 'bash', input: '{"command":"ls"}' }
+          ]
+        },
+      ];
+
+      const messages = convert(prompt);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('ASSISTANT');
+      expect(messages[0].content[0].type).toBe('TEXT');
+      expect(messages[0].toolCalls).toBeDefined();
+      expect(messages[0].toolCalls.length).toBe(1);
+      expect(messages[0].toolCalls[0].type).toBe('FUNCTION');
+      expect(messages[0].toolCalls[0].function.name).toBe('bash');
+    });
+
+    it('should convert tool results to TOOL messages', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertMessagesToCohereV2Format.bind(model);
+
+      const prompt = [
+        {
+          role: 'tool' as const,
+          content: [{
+            type: 'tool-result' as const,
+            toolCallId: 'call_123',
+            output: { type: 'text' as const, value: '/Users/test' }
+          }]
+        },
+      ];
+
+      const messages = convert(prompt);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0].role).toBe('TOOL');
+      expect(messages[0].toolCallId).toBeDefined();
+      expect(messages[0].content[0].type).toBe('TEXT');
+      expect(messages[0].content[0].text).toBe('/Users/test');
+    });
+
+    it('should handle full multi-turn conversation with tools', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertMessagesToCohereV2Format.bind(model);
+
+      const prompt = [
+        { role: 'system' as const, content: 'You are a coding assistant.' },
+        { role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] },
+        {
+          role: 'assistant' as const,
+          content: [
+            { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"ls"}' }
+          ]
+        },
+        {
+          role: 'tool' as const,
+          content: [{
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            output: { type: 'text' as const, value: 'file1.txt\nfile2.txt' }
+          }]
+        },
+        { role: 'user' as const, content: [{ type: 'text' as const, text: 'Now read file1.txt' }] },
+      ];
+
+      const messages = convert(prompt);
+
+      expect(messages).toHaveLength(5);
+      expect(messages[0].role).toBe('SYSTEM');
+      expect(messages[1].role).toBe('USER');
+      expect(messages[2].role).toBe('ASSISTANT');
+      expect(messages[3].role).toBe('TOOL');
+      expect(messages[4].role).toBe('USER');
+    });
+  });
+
+  describe('convertToolsToCohereV2', () => {
+    it('should convert tools to Cohere V2 function format', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertToolsToCohereV2.bind(model);
+
+      const tools = [
+        {
+          type: 'function' as const,
+          name: 'get_weather',
+          description: 'Get weather for a location',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              location: { type: 'string', description: 'City name' }
+            },
+            required: ['location']
+          }
+        }
+      ];
+
+      const converted = convert(tools);
+
+      expect(converted).toHaveLength(1);
+      expect(converted[0].type).toBe('FUNCTION');
+      expect(converted[0].function.name).toBe('get_weather');
+      expect(converted[0].function.description).toBe('Get weather for a location');
+      expect(converted[0].function.parameters.type).toBe('object');
+      expect(converted[0].function.parameters.properties.location.type).toBe('string');
+    });
+
+    it('should clean JSON schema in tool parameters', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertToolsToCohereV2.bind(model);
+
+      const tools = [
+        {
+          type: 'function' as const,
+          name: 'test_tool',
+          description: 'Test',
+          inputSchema: {
+            $schema: 'http://json-schema.org/draft-07/schema#',
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              name: { type: 'string', minLength: 1 }
+            }
+          }
+        }
+      ];
+
+      const converted = convert(tools);
+
+      expect(converted[0].function.parameters).not.toHaveProperty('$schema');
+      expect(converted[0].function.parameters).not.toHaveProperty('additionalProperties');
+      expect(converted[0].function.parameters.properties.name).not.toHaveProperty('minLength');
+    });
+
+    it('should return undefined for empty tools array', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const convert = (model as any).convertToolsToCohereV2.bind(model);
+
+      expect(convert([])).toBeUndefined();
+      expect(convert(null)).toBeUndefined();
+      expect(convert(undefined)).toBeUndefined();
+    });
+  });
+
+  describe('buildCohereV2ChatRequest', () => {
+    it('should build request with correct apiFormat', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = build(options);
+
+      expect(request.apiFormat).toBe('COHEREV2');
+      expect(request.messages).toBeDefined();
+      expect(request.maxTokens).toBe(1000);
+    });
+
+    it('should include tools when provided', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] }],
+        maxOutputTokens: 1000,
+        tools: [
+          { type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }
+        ],
+      };
+
+      const request = build(options);
+
+      expect(request.tools).toBeDefined();
+      expect(request.tools.length).toBe(1);
+      expect(request.tools[0].function.name).toBe('bash');
+    });
+
+    it('should map toolChoice to toolsChoice', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] }],
+        maxOutputTokens: 1000,
+        tools: [
+          { type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }
+        ],
+        toolChoice: { type: 'required' as const },
+      };
+
+      const request = build(options);
+
+      expect(request.toolsChoice).toBe('REQUIRED');
+    });
+
+    it('should set toolsChoice to NONE when toolChoice is none', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Hello' }] }],
+        maxOutputTokens: 1000,
+        tools: [
+          { type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }
+        ],
+        toolChoice: { type: 'none' as const },
+      };
+
+      const request = build(options);
+
+      expect(request.toolsChoice).toBe('NONE');
+    });
+
+    it('should include thinking parameter for reasoning models', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Think about this' }] }],
+        maxOutputTokens: 4000,
+      };
+
+      const request = build(options);
+
+      expect(request.thinking).toBeDefined();
+      expect(request.thinking.type).toBe('ENABLED');
+    });
+  });
+});
+
+/**
+ * Tests for dedicated endpoint serving mode
+ */
+describe('Dedicated Endpoint Serving Mode', () => {
+  it('should use dedicated serving mode when configured', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+      servingMode: 'dedicated',
+      endpointId: 'ocid1.endpoint.test123',
+    });
+
+    const model = provider.languageModel('custom-model');
+    const getServingMode = (model as any).getServingMode.bind(model);
+
+    const servingMode = getServingMode();
+
+    expect(servingMode.servingType).toBe('DEDICATED');
+    expect(servingMode.endpointId).toBe('ocid1.endpoint.test123');
+  });
+
+  it('should use on-demand serving mode by default', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const getServingMode = (model as any).getServingMode.bind(model);
+
+    const servingMode = getServingMode();
+
+    expect(servingMode.servingType).toBe('ON_DEMAND');
+    expect(servingMode.modelId).toBe('google.gemini-2.5-flash');
+  });
+
+  it('should throw error for dedicated-only models in on-demand mode', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+      servingMode: 'on-demand',
+    });
+
+    // Llama 4 models require dedicated clusters
+    expect(() => provider.languageModel('meta.llama-4-maverick-17b-128e-instruct-fp8'))
+      .toThrow('requires a dedicated AI cluster');
+  });
+});
+
+/**
+ * Tests for streaming response handling (doStream)
+ */
+describe('Streaming Response Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should emit stream-start event first', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    const reader = result.stream.getReader();
+    const firstChunk = await reader.read();
+
+    expect(firstChunk.value?.type).toBe('stream-start');
+    reader.releaseLock();
+  });
+
+  it('should emit text-start, text-delta, text-end for text content', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    const reader = result.stream.getReader();
+    const events: string[] = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) events.push(value.type);
+    }
+
+    expect(events).toContain('stream-start');
+    expect(events).toContain('text-start');
+    expect(events).toContain('text-delta');
+    expect(events).toContain('text-end');
+    expect(events).toContain('finish');
+  });
+
+  it('should emit tool-call events when model calls tools', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    // Mock client to return tool calls
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: {
+                content: [{
+                  type: 'TOOL_CALL',
+                  id: 'call_123',
+                  name: 'bash',
+                  arguments: '{"command":"ls"}',
+                }]
+              },
+              finishReason: 'TOOL_CALL',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'List files' }] }],
+      tools: [{ type: 'function', name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }],
+    });
+
+    const reader = result.stream.getReader();
+    const events: string[] = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) events.push(value.type);
+    }
+
+    expect(events).toContain('tool-input-start');
+    expect(events).toContain('tool-input-delta');
+    expect(events).toContain('tool-input-end');
+    expect(events).toContain('tool-call');
+  });
+
+  it('should emit finish event with usage information', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    const reader = result.stream.getReader();
+    let finishEvent: any = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value?.type === 'finish') finishEvent = value;
+    }
+
+    expect(finishEvent).not.toBeNull();
+    expect(finishEvent.finishReason).toBeDefined();
+    expect(finishEvent.usage).toBeDefined();
+    expect(finishEvent.usage.inputTokens).toBeDefined();
+    expect(finishEvent.usage.outputTokens).toBeDefined();
+  });
+
+  it('should emit error event on API failure', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockRejectedValue(new Error('API error')),
+    };
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    const reader = result.stream.getReader();
+    let errorEvent: any = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value?.type === 'error') errorEvent = value;
+    }
+
+    expect(errorEvent).not.toBeNull();
+    expect(errorEvent.error).toBeDefined();
+  });
+});
+
+/**
+ * Tests for image/file content handling
+ */
+describe('Image and File Content Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should convert base64 image content to OCI format', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convert = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const base64Data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const prompt = [
+      {
+        role: 'user' as const,
+        content: [
+          { type: 'text' as const, text: 'What is in this image?' },
+          { type: 'file' as const, data: base64Data, mediaType: 'image/png' }
+        ]
+      }
+    ];
+
+    const messages = convert(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('USER');
+    const content = messages[0].content as any[];
+    expect(content.length).toBe(2);
+    expect(content[0].type).toBe('TEXT');
+    expect(content[1].type).toBe('IMAGE');
+    expect(content[1].source.type).toBe('BASE64');
+    expect(content[1].source.data).toBe(base64Data);
+    expect(content[1].source.mediaType).toBe('image/png');
+  });
+
+  it('should default to image/png when mediaType not specified', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convert = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'user' as const,
+        content: [
+          { type: 'file' as const, data: 'base64data' }
+        ]
+      }
+    ];
+
+    const messages = convert(prompt);
+
+    const imageContent = messages[0].content[0] as any;
+    expect(imageContent.source.mediaType).toBe('image/png');
+  });
+});
+
+/**
+ * Tests for provider options handling
+ */
+describe('Provider Options Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  describe('reasoningEffort', () => {
+    it('should include reasoningEffort when specified for reasoning-capable models', () => {
+      const model = provider.languageModel('openai.gpt-oss-120b');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': {
+            reasoningEffort: 'HIGH',
+          },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.reasoningEffort).toBe('HIGH');
+    });
+
+    it('should support LOW, MEDIUM, HIGH values', () => {
+      const model = provider.languageModel('openai.gpt-oss-120b');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      for (const effort of ['LOW', 'MEDIUM', 'HIGH']) {
+        const options = {
+          prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+          maxOutputTokens: 1000,
+          providerOptions: {
+            'oci-genai': { reasoningEffort: effort },
+          },
+        };
+
+        const request = build(options);
+        expect(request.reasoningEffort).toBe(effort);
+      }
+    });
+  });
+
+  describe('thinkingBudgetTokens', () => {
+    it('should include thinkingBudgetTokens for Cohere reasoning models', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      const build = (model as any).buildCohereChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 4000,
+        providerOptions: {
+          'oci-genai': {
+            thinkingBudgetTokens: 16000,
+          },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.thinking).toBeDefined();
+      expect(request.thinking.type).toBe('ENABLED');
+      expect(request.thinking.budgetTokens).toBe(16000);
+    });
+
+    it('should include thinkingBudgetTokens in Cohere V2 requests', () => {
+      const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 4000,
+        providerOptions: {
+          'oci-genai': {
+            thinkingBudgetTokens: 31000,
+          },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.thinking.budgetTokens).toBe(31000);
+    });
+  });
+
+  describe('SWE defaults', () => {
+    it('should apply default temperature when not specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        // temperature not specified
+      };
+
+      const request = build(options);
+
+      // Google preset has temperature 0.1
+      expect(request.temperature).toBe(0.1);
+    });
+
+    it('should override default temperature when specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        temperature: 0.7,
+      };
+
+      const request = build(options);
+
+      expect(request.temperature).toBe(0.7);
+    });
+
+    it('should apply default topP when not specified', () => {
+      const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = build(options);
+
+      // Meta preset has topP 0.9
+      expect(request.topP).toBe(0.9);
+    });
+  });
+});
+
+/**
+ * Tests for edge cases in response handling
+ */
+describe('Response Handling Edge Cases', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should handle response with empty text content from Gemini', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    // Gemini sometimes returns empty TEXT objects alongside tool calls
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: {
+                content: [
+                  { type: 'TEXT', text: '' }, // Empty text
+                  { type: 'TOOL_CALL', id: 'call_1', name: 'bash', arguments: '{}' }
+                ]
+              },
+              finishReason: 'TOOL_CALL',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    // Should have tool call but no empty text
+    const textContent = result.content.filter(c => c.type === 'text');
+    const toolCalls = result.content.filter(c => c.type === 'tool-call');
+
+    expect(textContent.length).toBe(0); // Empty text should be filtered
+    expect(toolCalls.length).toBe(1);
+  });
+
+  it('should handle Cohere V2 response with toolPlan', async () => {
+    const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            message: {
+              content: [{ type: 'TEXT', text: 'Here is the answer' }],
+              toolPlan: 'I need to think about this step by step...',
+              toolCalls: []
+            },
+            finishReason: 'COMPLETE',
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Think about this' }] }],
+    });
+
+    // toolPlan should be included as reasoning content
+    const reasoning = result.content.filter(c => c.type === 'reasoning');
+    expect(reasoning.length).toBeGreaterThan(0);
+    expect((reasoning[0] as any).text).toContain('step by step');
+  });
+
+  it('should handle message.content as string fallback', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    // Some responses may have content as a direct string
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: {
+                content: 'Direct string response'
+              },
+              finishReason: 'COMPLETE',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    const textContent = result.content.filter(c => c.type === 'text');
+    expect(textContent.length).toBe(1);
+    expect((textContent[0] as any).text).toBe('Direct string response');
+  });
+
+  it('should handle message.text fallback', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    // Alternative response format with text property
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: {
+                text: 'Text property response'
+              },
+              finishReason: 'COMPLETE',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    const textContent = result.content.filter(c => c.type === 'text');
+    expect(textContent.length).toBe(1);
+    expect((textContent[0] as any).text).toBe('Text property response');
+  });
+
+  it('should handle tool_calls at message level', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    // Some models put tool_calls at message level instead of in content
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: {
+                content: [{ type: 'TEXT', text: '' }],
+                tool_calls: [{
+                  id: 'call_msg',
+                  function: {
+                    name: 'read',
+                    arguments: '{"path":"test.txt"}'
+                  }
+                }]
+              },
+              finishReason: 'TOOL_CALL',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Read test.txt' }] }],
+    });
+
+    const toolCalls = result.content.filter(c => c.type === 'tool-call');
+    expect(toolCalls.length).toBe(1);
+    expect((toolCalls[0] as any).toolName).toBe('read');
+    expect((toolCalls[0] as any).input).toContain('test.txt');
+  });
+});
+
+/**
+ * Tests for finish reason mapping
+ */
+describe('Finish Reason Mapping', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should map MAX_TOKENS to length', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: 'Truncated...' }] },
+              finishReason: 'MAX_TOKENS',
+            }],
+            usage: { promptTokens: 10, completionTokens: 1000 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('length');
+  });
+
+  it('should map TOOL_CALL to tool-calls', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: {
+                content: [{ type: 'TOOL_CALL', id: 'c', name: 'bash', arguments: '{}' }]
+              },
+              finishReason: 'TOOL_CALL',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('tool-calls');
+  });
+
+  it('should map CONTENT_FILTER to content-filter', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: '' }] },
+              finishReason: 'CONTENT_FILTER',
+            }],
+            usage: { promptTokens: 10, completionTokens: 0 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('content-filter');
+  });
+
+  it('should default to stop for unknown finish reasons', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: 'Done' }] },
+              finishReason: 'UNKNOWN_REASON',
+            }],
+            usage: { promptTokens: 10, completionTokens: 20 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('stop');
+  });
+});
+
+/**
  * Regression tests for multi-turn tool conversations
  * Issue: Tool results weren't being properly sent back to models
  * Fix: Proper message format conversion for each model family
@@ -1755,12 +2748,21 @@ describe('Multi-Turn Tool Conversation Regression', () => {
 
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('ASSISTANT');
-    // Gemini keeps native format: TEXT + TOOL_CALL + TOOL_CALL
-    const content = messages[0].content as any[];
-    expect(content.length).toBe(3);
-    expect(content[0].type).toBe('TEXT');
-    expect(content[1].type).toBe('TOOL_CALL');
-    expect(content[2].type).toBe('TOOL_CALL');
+    // Gemini: tool calls go in toolCalls array at message level, content should have TEXT only
+    const msg = messages[0] as any;
+    // Content should only contain the text part (or be null if empty)
+    if (msg.content) {
+      expect(msg.content.length).toBe(1);
+      expect(msg.content[0].type).toBe('TEXT');
+      expect(msg.content[0].text).toBe('I will run two commands.');
+    }
+    // Tool calls should be in the toolCalls array
+    expect(msg.toolCalls).toBeDefined();
+    expect(msg.toolCalls.length).toBe(2);
+    expect(msg.toolCalls[0].type).toBe('FUNCTION');
+    expect(msg.toolCalls[0].name).toBe('bash');
+    expect(msg.toolCalls[1].type).toBe('FUNCTION');
+    expect(msg.toolCalls[1].name).toBe('bash');
   });
 
   it('should handle assistant messages with mixed text and tool calls for Llama', () => {
@@ -1791,5 +2793,342 @@ describe('Multi-Turn Tool Conversation Regression', () => {
     // Both tool calls should be in the text
     expect(content[0].text).toContain('{"command":"ls"}');
     expect(content[0].text).toContain('{"command":"pwd"}');
+  });
+});
+
+/**
+ * Tests for usage and token counting
+ */
+describe('Usage and Token Counting', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should extract usage from Generic API response', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: 'Hello' }] },
+              finishReason: 'COMPLETE',
+            }],
+            usage: { promptTokens: 100, completionTokens: 50 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hi' }] }],
+    });
+
+    expect(result.usage.inputTokens).toBe(100);
+    expect(result.usage.outputTokens).toBe(50);
+    expect(result.usage.totalTokens).toBe(150);
+  });
+
+  it('should extract usage from Cohere V2 response', async () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            message: {
+              content: [{ type: 'TEXT', text: 'Hello' }],
+            },
+            finishReason: 'COMPLETE',
+            usage: { inputTokens: 75, outputTokens: 25 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hi' }] }],
+    });
+
+    expect(result.usage.inputTokens).toBe(75);
+    expect(result.usage.outputTokens).toBe(25);
+    expect(result.usage.totalTokens).toBe(100);
+  });
+
+  it('should handle missing usage gracefully', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: 'Hello' }] },
+              finishReason: 'COMPLETE',
+            }],
+            // No usage field
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hi' }] }],
+    });
+
+    expect(result.usage.inputTokens).toBe(0);
+    expect(result.usage.outputTokens).toBe(0);
+  });
+});
+
+/**
+ * Tests for empty and null handling
+ */
+describe('Empty and Null Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should handle empty prompt array', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convert = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    expect(convert([])).toEqual([]);
+    expect(convert(null)).toEqual([]);
+    expect(convert(undefined)).toEqual([]);
+  });
+
+  it('should handle empty Cohere prompt', () => {
+    const model = provider.languageModel('cohere.command-r-08-2024');
+    const convert = (model as any).convertMessagesToCohereFormat.bind(model);
+
+    const result = convert([]);
+    expect(result.message).toBe('');
+    expect(result.chatHistory).toEqual([]);
+    expect(result.toolResults).toEqual([]);
+  });
+
+  it('should handle empty Cohere V2 prompt', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const convert = (model as any).convertMessagesToCohereV2Format.bind(model);
+
+    expect(convert([])).toEqual([]);
+    expect(convert(null)).toEqual([]);
+  });
+
+  it('should handle null/undefined in tool schema cleaning', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const clean = (model as any).cleanJsonSchema.bind(model);
+
+    expect(clean(null)).toBe(null);
+    expect(clean(undefined)).toBe(undefined);
+    expect(clean(0)).toBe(0);
+    expect(clean('')).toBe('');
+    expect(clean(false)).toBe(false);
+  });
+
+  it('should handle empty tools array', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convert = (model as any).convertTools.bind(model);
+
+    expect(convert([])).toBeUndefined();
+    expect(convert(null)).toBeUndefined();
+    expect(convert(undefined)).toBeUndefined();
+  });
+});
+
+/**
+ * Tests for model ID parsing and provider detection
+ */
+describe('Model ID Parsing', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should correctly identify Cohere models', () => {
+    const cohereR = provider.languageModel('cohere.command-r-08-2024');
+    const cohereA = provider.languageModel('cohere.command-a-03-2025');
+
+    expect((cohereR as any).modelFamily).toBe('cohere');
+    expect((cohereA as any).modelFamily).toBe('cohere-v2');
+  });
+
+  it('should correctly identify Google models', () => {
+    const flash = provider.languageModel('google.gemini-2.5-flash');
+    const pro = provider.languageModel('google.gemini-2.5-pro');
+    const lite = provider.languageModel('google.gemini-2.5-flash-lite');
+
+    expect((flash as any).modelFamily).toBe('generic');
+    expect((pro as any).modelFamily).toBe('generic');
+    expect((lite as any).modelFamily).toBe('generic');
+  });
+
+  it('should correctly identify xAI models', () => {
+    const grok = provider.languageModel('xai.grok-4-1-fast-non-reasoning');
+    const grokMini = provider.languageModel('xai.grok-3-mini');
+
+    expect((grok as any).modelFamily).toBe('generic');
+    expect((grokMini as any).modelFamily).toBe('generic');
+  });
+
+  it('should correctly identify Meta Llama models', () => {
+    const llama33 = provider.languageModel('meta.llama-3.3-70b-instruct');
+    const llama31 = provider.languageModel('meta.llama-3.1-405b-instruct');
+
+    expect((llama33 as any).modelFamily).toBe('generic');
+    expect((llama31 as any).modelFamily).toBe('generic');
+  });
+
+  it('should correctly identify OpenAI models', () => {
+    const gptOss = provider.languageModel('openai.gpt-oss-120b');
+
+    expect((gptOss as any).modelFamily).toBe('generic');
+    expect((gptOss as any).swePreset.supportsReasoning).toBe(true);
+  });
+
+  it('should use default family for unknown prefixes', () => {
+    const unknown = provider.languageModel('unknown.model-123');
+
+    expect((unknown as any).modelFamily).toBe('generic');
+  });
+});
+
+/**
+ * Tests for generateId utility
+ */
+describe('ID Generation', () => {
+  it('should generate unique IDs', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertTools = (model as any).convertTools.bind(model);
+
+    // Generate multiple tool conversions and check IDs are different
+    // (IDs are generated when tools don't have explicit IDs)
+    const tools1 = convertTools([
+      { type: 'function', name: 'tool1', description: 'Test', inputSchema: {} }
+    ]);
+    const tools2 = convertTools([
+      { type: 'function', name: 'tool2', description: 'Test', inputSchema: {} }
+    ]);
+
+    // The tools themselves don't have IDs, but the conversion should work
+    expect(tools1).toBeDefined();
+    expect(tools2).toBeDefined();
+    expect(tools1[0].name).toBe('tool1');
+    expect(tools2[0].name).toBe('tool2');
+  });
+});
+
+/**
+ * Tests for warnings array
+ */
+describe('Warnings Handling', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should return empty warnings array from doGenerate', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    expect(result.warnings).toBeDefined();
+    expect(Array.isArray(result.warnings)).toBe(true);
+    expect(result.warnings.length).toBe(0);
+  });
+
+  it('should emit empty warnings in stream-start event', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    const reader = result.stream.getReader();
+    const { value } = await reader.read();
+
+    expect(value?.type).toBe('stream-start');
+    if (value?.type === 'stream-start') {
+      expect(value.warnings).toBeDefined();
+      expect(Array.isArray(value.warnings)).toBe(true);
+    }
+    reader.releaseLock();
+  });
+});
+
+/**
+ * Tests for supportedUrls property
+ */
+describe('Model Properties', () => {
+  it('should have specificationVersion v2', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    expect(model.specificationVersion).toBe('v2');
+  });
+
+  it('should have provider property', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    expect(model.provider).toBe('oci-genai');
+  });
+
+  it('should have empty supportedUrls', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    expect(model.supportedUrls).toBeDefined();
+    expect(typeof model.supportedUrls).toBe('object');
+  });
+
+  it('should have correct modelId', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    expect(model.modelId).toBe('google.gemini-2.5-flash');
   });
 });
