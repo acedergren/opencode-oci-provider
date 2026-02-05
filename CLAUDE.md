@@ -82,6 +82,49 @@ Enable debug logging to see cleaned schemas:
 OCI_DEBUG=1 opencode run "list files" --model oci-eu/google.gemini-2.5-flash
 ```
 
+## OCI API Parameters
+
+The provider forwards these AI SDK and OCI-specific parameters:
+
+| Parameter | Source | Builders |
+|-----------|--------|----------|
+| `topK` | `options.topK` | Generic, Cohere V1, Cohere V2 |
+| `seed` | `providerOptions['oci-genai'].seed` | Generic, Cohere V1, Cohere V2 |
+| `safetyMode` | `providerOptions['oci-genai'].safetyMode` | Cohere V1, Cohere V2 |
+| `maxCompletionTokens` | `providerOptions['oci-genai'].maxCompletionTokens` | Generic |
+| `responseFormat` | `options.responseFormat` (text/json) | Generic |
+| `toolChoice` | `options.toolChoice` (auto/required/none/tool) | Generic, Cohere V2 |
+| `stopSequences` | `options.stopSequences` | Generic, Cohere V2 |
+| `reasoningEffort` | `providerOptions['oci-genai'].reasoningEffort` | Generic (not xAI) |
+| `thinkingBudgetTokens` | `providerOptions['oci-genai'].thinkingBudgetTokens` | Cohere V1, Cohere V2 |
+
+### Finish Reason Mappings
+
+OCI finish reasons are mapped to AI SDK v5 values:
+- `COMPLETE/stop/STOP` → `'stop'`
+- `MAX_TOKENS/length` → `'length'`
+- `TOOL_CALL/tool_calls/TOOL_USE` → `'tool-calls'`
+- `CONTENT_FILTER/content_filter/ERROR_TOXIC` → `'content-filter'`
+- `ERROR/ERROR_LIMIT` → `'error'`
+- `USER_CANCEL` → `'other'`
+
+### Authentication
+
+Supported auth provider types via `OCIProviderSettings.authProvider`:
+- `'config-file'` (default) — uses `~/.oci/config`
+- `'session-token'` — uses session token auth
+- Pre-built `AuthenticationDetailsProvider` instance — for async providers (InstancePrincipals, ResourcePrincipal, OKE Workload Identity)
+
+Region is auto-detected from OCI config profile when not explicitly set.
+
+### AbortSignal Support
+
+Both `doGenerate` and `doStream` support cancellation via `options.abortSignal`.
+
+### Response Metadata
+
+`doGenerate` returns `request.body` (the chat request sent to OCI) and `response.{id, timestamp, modelId}` for telemetry. `doStream` emits a `response-metadata` event with `modelId` and `timestamp`.
+
 ## Pre-Commit
 
 Before committing:
@@ -105,5 +148,5 @@ src/
 
 ---
 
-**Last Updated:** 2026-02-05  
+**Last Updated:** 2026-02-05
 **Repo:** https://github.com/acedergr/opencode-oci-provider

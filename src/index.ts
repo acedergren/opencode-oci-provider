@@ -23,12 +23,17 @@ import * as oci from 'oci-generativeaiinference';
 import * as common from 'oci-common';
 import { isDedicatedOnly, getModelDisplayName } from './data/regions.js';
 
+export type OCIAuthProviderType =
+  | 'config-file'
+  | 'session-token';
+
 export interface OCIProviderSettings {
   compartmentId?: string;
   region?: string;
   configProfile?: string;
   servingMode?: 'on-demand' | 'dedicated';
   endpointId?: string;
+  authProvider?: OCIAuthProviderType | common.AuthenticationDetailsProvider;
 }
 
 /**
@@ -176,6 +181,28 @@ function generateId(): string {
   return `oci-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 }
 
+function abortablePromise<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 function mapFinishReason(raw: string | undefined): LanguageModelV2FinishReason {
   switch (raw) {
     case 'MAX_TOKENS':
@@ -191,20 +218,30 @@ function mapFinishReason(raw: string | undefined): LanguageModelV2FinishReason {
       return 'tool-calls';
     case 'CONTENT_FILTER':
     case 'content_filter':
+    case 'ERROR_TOXIC':
       return 'content-filter';
+    case 'ERROR':
+    case 'ERROR_LIMIT':
+      return 'error';
+    case 'USER_CANCEL':
+      return 'other';
     default:
       return 'stop';
   }
 }
 
-function createUsage(promptTokens?: number, completionTokens?: number): LanguageModelV2Usage {
-  return {
+function createUsage(promptTokens?: number, completionTokens?: number, reasoningTokens?: number): LanguageModelV2Usage {
+  const usage: LanguageModelV2Usage = {
     inputTokens: promptTokens,
     outputTokens: completionTokens,
     totalTokens: promptTokens !== undefined && completionTokens !== undefined
       ? promptTokens + completionTokens
       : undefined,
   };
+  if (reasoningTokens !== undefined && reasoningTokens > 0) {
+    (usage as any).reasoningTokens = reasoningTokens;
+  }
+  return usage;
 }
 
 /**
@@ -1056,32 +1093,64 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     private readonly settings: OCIProviderSettings,
     private readonly isDedicatedEndpoint: boolean = false,
   ) {
-    const provider = new common.ConfigFileAuthenticationDetailsProvider(
-      undefined,
-      settings.configProfile || 'DEFAULT'
-    );
+    const authProvider = OCIChatLanguageModelV2.createAuthProvider(settings);
     this.client = new oci.GenerativeAiInferenceClient({
-      authenticationDetailsProvider: provider,
+      authenticationDetailsProvider: authProvider,
     });
 
-    if (settings.region) {
-      this.client.region = common.Region.fromRegionId(settings.region);
+    // Determine region: explicit setting > config profile auto-detect
+    const region = settings.region;
+    if (region) {
+      this.client.region = common.Region.fromRegionId(region);
+    } else if (!settings.authProvider || settings.authProvider === 'config-file' || settings.authProvider === 'session-token' || typeof settings.authProvider === 'object') {
+      // Try to read region from OCI config profile
+      try {
+        const configFile = common.ConfigFileReader.parseDefault(settings.configProfile || 'DEFAULT');
+        const profileRegion = configFile.get('region');
+        if (profileRegion) {
+          this.client.region = common.Region.fromRegionId(profileRegion);
+        }
+      } catch {
+        // Config file not available or profile not found — region will need to be set elsewhere
+      }
     }
 
     this.modelFamily = getModelFamily(modelId);
     this.swePreset = getSWEPreset(modelId);
   }
 
+  private static createAuthProvider(settings: OCIProviderSettings): common.AuthenticationDetailsProvider {
+    const authSetting = settings.authProvider;
+
+    // If a pre-built AuthenticationDetailsProvider instance is passed, use it directly.
+    // This supports async providers (InstancePrincipals, ResourcePrincipal, OKE Workload Identity)
+    // that must be built with async builders before passing to the provider.
+    if (authSetting && typeof authSetting === 'object') {
+      return authSetting;
+    }
+
+    const authType = (authSetting as string) || 'config-file';
+
+    switch (authType) {
+      case 'session-token':
+        return new common.SessionAuthDetailProvider(
+          undefined,
+          settings.configProfile || 'DEFAULT'
+        );
+      case 'config-file':
+      default:
+        return new common.ConfigFileAuthenticationDetailsProvider(
+          undefined,
+          settings.configProfile || 'DEFAULT'
+        );
+    }
+  }
+
   get provider(): string {
     return 'oci-genai';
   }
 
-  async doGenerate(options: LanguageModelV2CallOptions): Promise<{
-    content: LanguageModelV2Content[];
-    finishReason: LanguageModelV2FinishReason;
-    usage: LanguageModelV2Usage;
-    warnings: LanguageModelV2CallWarning[];
-  }> {
+  async doGenerate(options: LanguageModelV2CallOptions) {
     const servingMode = this.getServingMode();
     const chatRequest = this.buildChatRequest(options);
 
@@ -1100,8 +1169,17 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
     let response;
     try {
-      response = await this.client.chat({ chatDetails });
+      // Wire up abort signal for cancellation support
+      const chatPromise = this.client.chat({ chatDetails });
+      if (options.abortSignal) {
+        response = await abortablePromise(chatPromise, options.abortSignal);
+      } else {
+        response = await chatPromise;
+      }
     } catch (error) {
+      if ((error as any)?.name === 'AbortError') {
+        throw error;
+      }
       throw parseOCIError(error, this.modelId);
     }
 
@@ -1272,11 +1350,31 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       completionTokens = usageInfo?.completionTokens || 0;
     }
 
+    // Extract reasoning tokens if available
+    let reasoningTokens: number | undefined;
+    if (this.modelFamily === 'cohere-v2') {
+      const v2Usage = (chatResult?.chatResponse as any)?.usage;
+      reasoningTokens = v2Usage?.reasoningTokens || v2Usage?.thinkingTokens;
+    } else if (this.modelFamily === 'generic') {
+      const genUsage = (chatResult?.chatResponse as any)?.usage;
+      reasoningTokens = genUsage?.reasoningTokens || genUsage?.reasoning_tokens;
+    }
+
+    // Capture response metadata for debugging and telemetry
+    const chatResponse = chatResult?.chatResponse as any;
+    const responseTimestamp = chatResponse?.timeCreated ? new Date(chatResponse.timeCreated) : undefined;
+
     return {
       content,
       finishReason,
-      usage: createUsage(promptTokens, completionTokens),
+      usage: createUsage(promptTokens, completionTokens, reasoningTokens),
       warnings: [],
+      request: { body: chatRequest },
+      response: {
+        id: (response as any)?.opcRequestId || chatResponse?.id,
+        timestamp: responseTimestamp,
+        modelId: this.modelId,
+      },
     };
   }
 
@@ -1303,6 +1401,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     const modelFamily = this.modelFamily;
     const swePreset = this.swePreset;
     const modelId = this.modelId;
+    const abortSignal = options.abortSignal;
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       async start(controller) {
@@ -1315,7 +1414,17 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             warnings: [],
           });
 
-          const response = await client.chat({ chatDetails });
+          // Emit response metadata
+          controller.enqueue({
+            type: 'response-metadata',
+            modelId,
+            timestamp: new Date(),
+          } as any);
+
+          const chatPromise = client.chat({ chatDetails });
+          const response = abortSignal
+            ? await abortablePromise(chatPromise, abortSignal)
+            : await chatPromise;
 
           // Check if we got a streaming response (ReadableStream) or a non-streaming response
           if (response && typeof (response as any).getReader === 'function') {
@@ -1419,6 +1528,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     // Cohere requires isForceSingleStep=true when both message and toolResults are present
     const hasToolResults = toolResults && toolResults.length > 0;
 
+    const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
+
     const request: any = {
       apiFormat: 'COHERE',
       message,
@@ -1433,9 +1544,25 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       ...(hasToolResults && { toolResults, isForceSingleStep: true }),
     };
 
+    // topK parameter
+    if (options.topK !== undefined) {
+      request.topK = options.topK;
+    }
+
+    // seed for reproducible outputs
+    const seed = providerOptions?.seed as number | undefined;
+    if (seed !== undefined) {
+      request.seed = seed;
+    }
+
+    // safetyMode: CONTEXTUAL | STRICT | OFF
+    const safetyMode = providerOptions?.safetyMode as string | undefined;
+    if (safetyMode) {
+      request.safetyMode = safetyMode;
+    }
+
     // Add thinking parameter for Cohere reasoning models
     if (this.swePreset.supportsReasoning) {
-      const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
       const budgetTokens = providerOptions?.thinkingBudgetTokens as number | undefined;
 
       request.thinking = {
@@ -1476,6 +1603,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       // (after receiving tool results) should be free to respond with text
     }
 
+    const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
+
     const request: any = {
       apiFormat: 'COHEREV2',
       messages,
@@ -1486,11 +1615,29 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       presencePenalty: this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty),
       ...(tools && { tools }),
       ...(toolsChoice && { toolsChoice }),
+      // Cohere V2 supports stopSequences
+      ...(options.stopSequences && options.stopSequences.length > 0 && { stopSequences: options.stopSequences }),
     };
+
+    // topK parameter
+    if (options.topK !== undefined) {
+      request.topK = options.topK;
+    }
+
+    // seed for reproducible outputs
+    const seed = providerOptions?.seed as number | undefined;
+    if (seed !== undefined) {
+      request.seed = seed;
+    }
+
+    // safetyMode: CONTEXTUAL | STRICT | OFF
+    const safetyMode = providerOptions?.safetyMode as string | undefined;
+    if (safetyMode) {
+      request.safetyMode = safetyMode;
+    }
 
     // Add thinking parameter for Cohere reasoning models (Command A Reasoning)
     if (this.swePreset.supportsReasoning) {
-      const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
       const budgetTokens = providerOptions?.thinkingBudgetTokens as number | undefined;
 
       request.thinking = {
@@ -1517,6 +1664,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     // Check if model supports stop sequences (defaults to true if not specified)
     const supportsStop = this.swePreset.supportsStopSequences !== false;
 
+    const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
+
     // Base request
     const request: any = {
       apiFormat: 'GENERIC',
@@ -1529,23 +1678,102 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       ...(tools && { tools }),
     };
 
+    // Map AI SDK toolChoice to OCI Generic toolChoice
+    if (tools && options.toolChoice) {
+      const toolChoice = this.mapToolChoiceToGeneric(options.toolChoice);
+      if (toolChoice) {
+        request.toolChoice = toolChoice;
+      }
+    }
+
     // Only include penalty parameters for models that support them (e.g., not xAI/Grok)
     if (this.swePreset.supportsPenalties) {
       request.frequencyPenalty = this.applyDefaults(options.frequencyPenalty, this.swePreset.frequencyPenalty);
       request.presencePenalty = this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty);
     }
 
+    // topK parameter
+    if (options.topK !== undefined) {
+      request.topK = options.topK;
+    }
+
+    // seed for reproducible outputs (via providerOptions)
+    const seed = providerOptions?.seed as number | undefined;
+    if (seed !== undefined) {
+      request.seed = seed;
+    }
+
+    // responseFormat for structured output (JSON mode)
+    if (options.responseFormat) {
+      const ociFormat = this.mapResponseFormat(options.responseFormat);
+      if (ociFormat) {
+        request.responseFormat = ociFormat;
+      }
+    }
+
+    // maxCompletionTokens for reasoning models (budget total including thinking)
+    const maxCompletionTokens = providerOptions?.maxCompletionTokens as number | undefined;
+    if (maxCompletionTokens !== undefined) {
+      request.maxCompletionTokens = maxCompletionTokens;
+    }
+
     // Include reasoningEffort for models that support reasoning API parameter
     // Note: xAI Grok models use model variant selection (grok-4-1-fast-reasoning vs non-reasoning)
     // instead of reasoningEffort parameter, so we skip it for xAI
     if (this.swePreset.supportsReasoning && !this.modelId.startsWith('xai.')) {
-      const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
       const reasoningEffort = providerOptions?.reasoningEffort as string | undefined;
       // Default to MEDIUM if not specified
       request.reasoningEffort = reasoningEffort || 'MEDIUM';
     }
 
     return request;
+  }
+
+  /**
+   * Map AI SDK toolChoice to OCI Generic format toolChoice.
+   * OCI Generic supports: ToolChoiceAuto, ToolChoiceRequired, ToolChoiceNone, ToolChoiceFunction
+   */
+  private mapToolChoiceToGeneric(toolChoice: LanguageModelV2CallOptions['toolChoice']): any | undefined {
+    if (!toolChoice) return undefined;
+
+    switch (toolChoice.type) {
+      case 'auto':
+        return { type: 'AUTO' };
+      case 'required':
+        return { type: 'REQUIRED' };
+      case 'none':
+        return { type: 'NONE' };
+      case 'tool':
+        return {
+          type: 'FUNCTION',
+          functionName: toolChoice.toolName,
+        };
+      default:
+        return undefined;
+    }
+  }
+
+  /**
+   * Map AI SDK responseFormat to OCI format.
+   * OCI supports: TextResponseFormat, JsonObjectResponseFormat, JsonSchemaResponseFormat
+   */
+  private mapResponseFormat(responseFormat: LanguageModelV2CallOptions['responseFormat']): any | undefined {
+    if (!responseFormat) return undefined;
+
+    switch (responseFormat.type) {
+      case 'text':
+        return { type: 'TEXT' };
+      case 'json':
+        if (responseFormat.schema) {
+          return {
+            type: 'JSON_SCHEMA',
+            jsonSchema: this.cleanJsonSchema(responseFormat.schema),
+          };
+        }
+        return { type: 'JSON_OBJECT' };
+      default:
+        return undefined;
+    }
   }
 
   /**

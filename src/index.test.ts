@@ -3201,3 +3201,739 @@ describe('Model Properties', () => {
     expect(model.modelId).toBe('google.gemini-2.5-flash');
   });
 });
+
+/**
+ * Tests for new finish reason mappings
+ */
+describe('Finish Reason Mappings', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should map ERROR to error finish reason', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: 'partial' }] },
+              finishReason: 'ERROR',
+            }],
+            usage: { promptTokens: 10, completionTokens: 5 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('error');
+  });
+
+  it('should map ERROR_TOXIC to content-filter finish reason', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: '' }] },
+              finishReason: 'ERROR_TOXIC',
+            }],
+            usage: { promptTokens: 10, completionTokens: 0 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('content-filter');
+  });
+
+  it('should map ERROR_LIMIT to error finish reason', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: '' }] },
+              finishReason: 'ERROR_LIMIT',
+            }],
+            usage: { promptTokens: 10, completionTokens: 0 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('error');
+  });
+
+  it('should map USER_CANCEL to other finish reason', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockResolvedValue({
+        chatResult: {
+          chatResponse: {
+            choices: [{
+              message: { content: [{ type: 'TEXT', text: 'partial' }] },
+              finishReason: 'USER_CANCEL',
+            }],
+            usage: { promptTokens: 10, completionTokens: 5 },
+          },
+        },
+      }),
+    };
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+    });
+
+    expect(result.finishReason).toBe('other');
+  });
+});
+
+/**
+ * Tests for toolChoice mapping in Generic format
+ */
+describe('Generic Format toolChoice Mapping', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should map auto toolChoice to AUTO', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const build = (model as any).buildGenericChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      tools: [{ type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }],
+      toolChoice: { type: 'auto' as const },
+    };
+
+    const request = build(options);
+
+    expect(request.toolChoice).toEqual({ type: 'AUTO' });
+  });
+
+  it('should map required toolChoice to REQUIRED', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const build = (model as any).buildGenericChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      tools: [{ type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }],
+      toolChoice: { type: 'required' as const },
+    };
+
+    const request = build(options);
+
+    expect(request.toolChoice).toEqual({ type: 'REQUIRED' });
+  });
+
+  it('should map none toolChoice to NONE', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const build = (model as any).buildGenericChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      tools: [{ type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }],
+      toolChoice: { type: 'none' as const },
+    };
+
+    const request = build(options);
+
+    expect(request.toolChoice).toEqual({ type: 'NONE' });
+  });
+
+  it('should map specific tool toolChoice to FUNCTION with functionName', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const build = (model as any).buildGenericChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      tools: [{ type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }],
+      toolChoice: { type: 'tool' as const, toolName: 'bash' },
+    };
+
+    const request = build(options);
+
+    expect(request.toolChoice).toEqual({ type: 'FUNCTION', functionName: 'bash' });
+  });
+
+  it('should not include toolChoice when no tools are provided', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const build = (model as any).buildGenericChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      toolChoice: { type: 'required' as const },
+    };
+
+    const request = build(options);
+
+    expect(request.toolChoice).toBeUndefined();
+  });
+
+  it('should not include toolChoice when toolChoice is not specified', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const build = (model as any).buildGenericChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      tools: [{ type: 'function' as const, name: 'bash', description: 'Run bash', inputSchema: { type: 'object' } }],
+    };
+
+    const request = build(options);
+
+    expect(request.toolChoice).toBeUndefined();
+  });
+});
+
+/**
+ * Tests for new OCI API parameters (topK, seed, responseFormat, maxCompletionTokens)
+ */
+describe('New OCI API Parameters', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  describe('topK parameter', () => {
+    it('should include topK in Generic request when specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        topK: 40,
+      };
+
+      const request = build(options);
+
+      expect(request.topK).toBe(40);
+    });
+
+    it('should include topK in Cohere request when specified', () => {
+      const model = provider.languageModel('cohere.command-r-plus-08-2024');
+      const build = (model as any).buildCohereChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        topK: 50,
+      };
+
+      const request = build(options);
+
+      expect(request.topK).toBe(50);
+    });
+
+    it('should include topK in Cohere V2 request when specified', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        topK: 30,
+      };
+
+      const request = build(options);
+
+      expect(request.topK).toBe(30);
+    });
+
+    it('should not include topK when not specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = build(options);
+
+      expect(request.topK).toBeUndefined();
+    });
+  });
+
+  describe('seed parameter', () => {
+    it('should include seed in Generic request via providerOptions', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': { seed: 42 },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.seed).toBe(42);
+    });
+
+    it('should include seed in Cohere request via providerOptions', () => {
+      const model = provider.languageModel('cohere.command-r-plus-08-2024');
+      const build = (model as any).buildCohereChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': { seed: 123 },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.seed).toBe(123);
+    });
+
+    it('should include seed in Cohere V2 request via providerOptions', () => {
+      const model = provider.languageModel('cohere.command-a-03-2025');
+      const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': { seed: 99 },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.seed).toBe(99);
+    });
+
+    it('should not include seed when not specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = build(options);
+
+      expect(request.seed).toBeUndefined();
+    });
+  });
+
+  describe('responseFormat parameter', () => {
+    it('should map text responseFormat', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        responseFormat: { type: 'text' as const },
+      };
+
+      const request = build(options);
+
+      expect(request.responseFormat).toEqual({ type: 'TEXT' });
+    });
+
+    it('should map json responseFormat without schema to JSON_OBJECT', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        responseFormat: { type: 'json' as const },
+      };
+
+      const request = build(options);
+
+      expect(request.responseFormat).toEqual({ type: 'JSON_OBJECT' });
+    });
+
+    it('should map json responseFormat with schema to JSON_SCHEMA', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const schema = {
+        type: 'object',
+        properties: { name: { type: 'string' } },
+        required: ['name'],
+      };
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        responseFormat: { type: 'json' as const, schema },
+      };
+
+      const request = build(options);
+
+      expect(request.responseFormat.type).toBe('JSON_SCHEMA');
+      expect(request.responseFormat.jsonSchema).toBeDefined();
+      expect(request.responseFormat.jsonSchema.type).toBe('object');
+    });
+
+    it('should not include responseFormat when not specified', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = build(options);
+
+      expect(request.responseFormat).toBeUndefined();
+    });
+  });
+
+  describe('maxCompletionTokens parameter', () => {
+    it('should include maxCompletionTokens via providerOptions', () => {
+      const model = provider.languageModel('openai.gpt-oss-120b');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': { maxCompletionTokens: 8000 },
+        },
+      };
+
+      const request = build(options);
+
+      expect(request.maxCompletionTokens).toBe(8000);
+    });
+
+    it('should not include maxCompletionTokens when not specified', () => {
+      const model = provider.languageModel('openai.gpt-oss-120b');
+      const build = (model as any).buildGenericChatRequest.bind(model);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = build(options);
+
+      expect(request.maxCompletionTokens).toBeUndefined();
+    });
+  });
+});
+
+/**
+ * Tests for Cohere safety mode and stop sequences
+ */
+describe('Cohere safetyMode and stopSequences', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should include safetyMode in Cohere V1 request via providerOptions', () => {
+    const model = provider.languageModel('cohere.command-r-plus-08-2024');
+    const build = (model as any).buildCohereChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      providerOptions: {
+        'oci-genai': { safetyMode: 'STRICT' },
+      },
+    };
+
+    const request = build(options);
+
+    expect(request.safetyMode).toBe('STRICT');
+  });
+
+  it('should include safetyMode in Cohere V2 request via providerOptions', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      providerOptions: {
+        'oci-genai': { safetyMode: 'OFF' },
+      },
+    };
+
+    const request = build(options);
+
+    expect(request.safetyMode).toBe('OFF');
+  });
+
+  it('should not include safetyMode when not specified', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+    };
+
+    const request = build(options);
+
+    expect(request.safetyMode).toBeUndefined();
+  });
+
+  it('should include stopSequences in Cohere V2 request', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      stopSequences: ['STOP', 'END'],
+    };
+
+    const request = build(options);
+
+    expect(request.stopSequences).toEqual(['STOP', 'END']);
+  });
+
+  it('should not include stopSequences in Cohere V2 when empty', () => {
+    const model = provider.languageModel('cohere.command-a-03-2025');
+    const build = (model as any).buildCohereV2ChatRequest.bind(model);
+
+    const options = {
+      prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Test' }] }],
+      maxOutputTokens: 1000,
+      stopSequences: [],
+    };
+
+    const request = build(options);
+
+    expect(request.stopSequences).toBeUndefined();
+  });
+});
+
+/**
+ * Tests for abortSignal support
+ */
+describe('AbortSignal Support', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should abort doGenerate when signal is triggered', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const controller = new AbortController();
+
+    // Mock a slow chat call
+    (model as any).client = {
+      chat: vi.fn().mockImplementation(() =>
+        new Promise((resolve) => setTimeout(resolve, 5000))
+      ),
+    };
+
+    // Abort immediately
+    controller.abort();
+
+    await expect(
+      model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+        abortSignal: controller.signal,
+      })
+    ).rejects.toThrow('aborted');
+  });
+
+  it('should abort doGenerate when signal fires during request', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const controller = new AbortController();
+
+    // Mock a slow chat call
+    (model as any).client = {
+      chat: vi.fn().mockImplementation(() =>
+        new Promise((resolve) => setTimeout(resolve, 5000))
+      ),
+    };
+
+    // Abort after 10ms
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(
+      model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+        abortSignal: controller.signal,
+      })
+    ).rejects.toThrow('aborted');
+  });
+
+  it('should not throw when signal is not aborted', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const controller = new AbortController();
+
+    // Normal response, no abort
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Test' }] }],
+      abortSignal: controller.signal,
+    });
+
+    expect(result.content).toBeDefined();
+    expect(result.finishReason).toBeDefined();
+  });
+});
+
+/**
+ * Tests for response metadata
+ */
+describe('Response Metadata', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should return request body in doGenerate response', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    expect(result.request).toBeDefined();
+    expect(result.request?.body).toBeDefined();
+    // The body should contain the chat request
+    const body = result.request?.body as any;
+    expect(body.apiFormat).toBe('GENERIC');
+  });
+
+  it('should return response metadata with modelId in doGenerate response', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doGenerate({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    expect(result.response).toBeDefined();
+    expect(result.response?.modelId).toBe('google.gemini-2.5-flash');
+  });
+
+  it('should emit response-metadata event in doStream', async () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    const result = await model.doStream({
+      prompt: [{ role: 'user', content: [{ type: 'text', text: 'Hello' }] }],
+    });
+
+    const reader = result.stream.getReader();
+    const events: any[] = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) events.push(value);
+    }
+
+    const metadataEvent = events.find(e => e.type === 'response-metadata');
+    expect(metadataEvent).toBeDefined();
+    expect(metadataEvent.modelId).toBe('google.gemini-2.5-flash');
+    expect(metadataEvent.timestamp).toBeInstanceOf(Date);
+  });
+});
+
+/**
+ * Tests for auth provider configuration
+ */
+describe('Auth Provider Configuration', () => {
+  it('should accept session-token auth provider type', () => {
+    // This will fail to authenticate but should not throw during construction
+    // since the mock handles the constructor
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+      authProvider: 'session-token',
+    });
+
+    expect(provider).toBeDefined();
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    expect(model).toBeDefined();
+  });
+
+  it('should accept config-file auth provider type (default)', () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+      authProvider: 'config-file',
+    });
+
+    expect(provider).toBeDefined();
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    expect(model).toBeDefined();
+  });
+
+  it('should accept a pre-built auth provider instance', () => {
+    // Create a mock auth provider object
+    const mockAuthProvider = {
+      getKeyId: () => Promise.resolve('mock-key-id'),
+      getUser: () => Promise.resolve('mock-user'),
+    };
+
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+      authProvider: mockAuthProvider as any,
+    });
+
+    expect(provider).toBeDefined();
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    expect(model).toBeDefined();
+  });
+});
