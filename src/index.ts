@@ -727,6 +727,25 @@ async function handleGenericSSEEvent(
     }
   }
 
+  // Handle tool calls from message.toolCalls array (Gemini/Google format)
+  // OCI Generic format returns: { message: { content: [...], toolCalls: [...] } }
+  if (event.message?.toolCalls && Array.isArray(event.message.toolCalls)) {
+    for (const tc of event.message.toolCalls) {
+      const toolId = tc.id || generateId();
+      const toolName = tc.name || tc.function?.name || '';
+      // Arguments can be a string or an object
+      const rawArgs = tc.arguments || tc.function?.arguments || tc.parameters || {};
+      const input = typeof rawArgs === 'string' ? rawArgs : JSON.stringify(rawArgs);
+      
+      if (!state.toolCalls.has(toolId)) {
+        state.toolCalls.set(toolId, { toolName, input });
+        state.toolCallsStarted.add(toolId);
+        controller.enqueue({ type: 'tool-input-start', id: toolId, toolName });
+        controller.enqueue({ type: 'tool-input-delta', id: toolId, delta: input });
+      }
+    }
+  }
+
   // Handle finish reason at event level
   if (event.finishReason) {
     updateState({ finishReason: mapFinishReason(event.finishReason) });
