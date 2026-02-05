@@ -1,6 +1,6 @@
 {
   "name": "opencode-oci-provider",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OCI GenAI provider for OpenCode with setup wizard (AI SDK V2 compatible)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
