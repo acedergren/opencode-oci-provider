@@ -58,13 +58,14 @@ const KNOWN_MODELS: ModelInfo[] = [
   { id: 'meta.llama-3.1-405b-instruct', name: 'Meta Llama 3.1 405B', vendor: 'meta', capabilities: ['chat'] },
 
   // xAI models (US regions only: Ashburn, Chicago, Phoenix)
-  { id: 'xai.grok-4-1-fast', name: 'xAI Grok 4.1 Fast', vendor: 'xai', capabilities: ['chat', 'vision'] },
+  { id: 'xai.grok-4-1-fast-reasoning', name: 'xAI Grok 4.1 Fast (Reasoning)', vendor: 'xai', capabilities: ['chat', 'vision', 'reasoning'] },
+  { id: 'xai.grok-4-1-fast-non-reasoning', name: 'xAI Grok 4.1 Fast', vendor: 'xai', capabilities: ['chat', 'vision'] },
   { id: 'xai.grok-4-fast', name: 'xAI Grok 4 Fast', vendor: 'xai', capabilities: ['chat'] },
   { id: 'xai.grok-4', name: 'xAI Grok 4', vendor: 'xai', capabilities: ['chat'] },
   { id: 'xai.grok-3-fast', name: 'xAI Grok 3 Fast', vendor: 'xai', capabilities: ['chat'] },
   { id: 'xai.grok-3', name: 'xAI Grok 3', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-3-mini', name: 'xAI Grok 3 Mini', vendor: 'xai', capabilities: ['chat'] },
-  { id: 'xai.grok-3-mini-fast', name: 'xAI Grok 3 Mini Fast', vendor: 'xai', capabilities: ['chat'] },
+  { id: 'xai.grok-3-mini', name: 'xAI Grok 3 Mini (Reasoning)', vendor: 'xai', capabilities: ['chat', 'reasoning'] },
+  { id: 'xai.grok-3-mini-fast', name: 'xAI Grok 3 Mini Fast (Reasoning)', vendor: 'xai', capabilities: ['chat', 'reasoning'] },
   { id: 'xai.grok-code-fast-1', name: 'xAI Grok Code Fast', vendor: 'xai', capabilities: ['chat', 'code'] },
 
   // OpenAI models

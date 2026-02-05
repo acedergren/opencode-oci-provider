@@ -68,9 +68,9 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsPenalties: false,
     supportsReasoning: false,  // Only Flash variants with explicit config support reasoningEffort
   },
-  // xAI Grok - supports tools, but NOT frequencyPenalty/presencePenalty, stop sequences, or reasoning_effort
-  // Note: OCI docs suggest reasoning_effort is available, but Grok models throw:
-  // "This model does not support `reasoning_effort`"
+  // xAI Grok - supports tools, but NOT frequencyPenalty/presencePenalty or stop sequences
+  // Reasoning is controlled by model variant selection (e.g., grok-4-1-fast-reasoning vs grok-4-1-fast-non-reasoning)
+  // Models like grok-3-mini "think before responding" and return reasoning content
   'xai': {
     temperature: 0.1,
     topP: 0.9,
@@ -79,7 +79,7 @@ const SWE_PRESETS: Record<string, SWEPreset> = {
     supportsTools: true,
     supportsPenalties: false,
     supportsStopSequences: false,  // Per OCI docs, stop sequences not listed as supported
-    supportsReasoning: false,      // Grok throws error: "This model does not support `reasoning_effort`"
+    supportsReasoning: false,      // Base value; overridden in getSWEPreset for reasoning model variants
   },
   // Meta Llama - balanced for code, no reasoning support
   'meta': {
@@ -128,9 +128,15 @@ function getSWEPreset(modelId: string): SWEPreset {
   }
 
   // xAI Grok models: reasoning is controlled by model variant, not API parameter
-  // All Grok models through OCI use supportsReasoning=false (no reasoning_effort param)
+  // Models with "-reasoning" suffix or "mini" (which think before responding) support reasoning
   if (modelId.startsWith('xai.')) {
-    return { ...basePreset, supportsReasoning: false };
+    // grok-4-1-fast-reasoning has explicit reasoning suffix
+    // grok-4-1-fast-non-reasoning explicitly does NOT support reasoning
+    // grok-3-mini and grok-3-mini-fast are "lightweight models that think before responding"
+    const isReasoningModel = (modelId.endsWith('-reasoning') || 
+                              modelId.includes('grok-3-mini')) &&
+                             !modelId.includes('-non-reasoning');
+    return { ...basePreset, supportsReasoning: isReasoningModel };
   }
 
   // Cohere reasoning models (command-a-reasoning-*) support thinking via thinkingBudgetTokens (not reasoningEffort)

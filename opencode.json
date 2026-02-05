@@ -10,16 +10,28 @@
         "region": "us-chicago-1"
       },
       "models": {
-        "xai.grok-4.1-fast-reasoning": {
+        "xai.grok-4-1-fast-reasoning": {
           "name": "Grok 4.1 Fast (Reasoning)",
           "limit": { "context": 2000000, "output": 16000 }
         },
-        "xai.grok-4.1-fast-non-reasoning": {
-          "name": "Grok 4.1 Fast (Non-Reasoning)",
+        "xai.grok-4-1-fast-non-reasoning": {
+          "name": "Grok 4.1 Fast",
           "limit": { "context": 2000000, "output": 16000 }
+        },
+        "xai.grok-4-fast": {
+          "name": "Grok 4 Fast",
+          "limit": { "context": 131072, "output": 16000 }
+        },
+        "xai.grok-4": {
+          "name": "Grok 4",
+          "limit": { "context": 131072, "output": 16000 }
         },
         "xai.grok-3-fast": {
           "name": "Grok 3 Fast",
+          "limit": { "context": 131072, "output": 8192 }
+        },
+        "xai.grok-3": {
+          "name": "Grok 3",
           "limit": { "context": 131072, "output": 8192 }
         }
       }
