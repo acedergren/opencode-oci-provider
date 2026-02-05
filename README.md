@@ -96,13 +96,17 @@ export OCI_CONFIG_PROFILE=DEFAULT
 
 | Provider | Model ID | Notes |
 |----------|----------|-------|
-| Cohere | `cohere.command-r-plus-08-2024` | Best quality |
-| Cohere | `cohere.command-r-08-2024` | Balanced |
-| Google | `google.gemini-2.0-flash-001` | Fast |
-| Google | `google.gemini-1.5-pro-002` | Advanced |
-| xAI | `xai.grok-4.1-fast-non-reasoning` | **US regions only** |
-| Meta | `meta.llama-3.1-405b-instruct` | Large |
-| Meta | `meta.llama-3.1-70b-instruct` | Medium |
+| Cohere | `cohere.command-a-03-2025` | Latest Cohere model |
+| Cohere | `cohere.command-a-reasoning-08-2025` | With reasoning |
+| Cohere | `cohere.command-r-plus-08-2024` | Balanced quality |
+| Google | `google.gemini-2.5-flash` | Fast, multimodal |
+| Google | `google.gemini-2.5-pro` | Best Google quality |
+| xAI | `xai.grok-4-1-fast-reasoning` | **US regions only**, with reasoning |
+| xAI | `xai.grok-4-1-fast-non-reasoning` | **US regions only**, fastest |
+| xAI | `xai.grok-code-fast-1` | **US regions only**, coding-focused |
+| Meta | `meta.llama-3.3-70b-instruct` | Latest Llama |
+| Meta | `meta.llama-3.1-405b-instruct` | Largest Llama |
+| OpenAI | `openai.gpt-oss-120b` | OpenAI compatible |
 
 ### Region Availability
 
@@ -136,7 +140,14 @@ Verify your OCI CLI is configured: `oci iam region list`
 
 ### "Model not available in region"
 
-xAI models are only available in US regions. Use Cohere, Google, or Meta models in other regions.
+xAI models are only available in US regions (us-chicago-1, us-ashburn-1, us-phoenix-1, us-sanjose-1). Use Cohere, Google, or Meta models in other regions.
+
+### xAI Grok Reasoning
+
+xAI Grok models control reasoning through **model variant selection**, not API parameters:
+- `xai.grok-4-1-fast-reasoning` — With extended thinking
+- `xai.grok-4-1-fast-non-reasoning` — Standard (faster)
+- `xai.grok-3-mini` / `xai.grok-3-mini-fast` — Compact models that think before responding
 
 ## Legal
 

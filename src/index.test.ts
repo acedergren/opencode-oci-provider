@@ -1033,6 +1033,45 @@ describe('Reasoning Support', () => {
       expect((standardModel as any).swePreset.supportsReasoning).toBe(false);
     });
 
+    it('should NOT send reasoningEffort parameter for xAI models even when supportsReasoning=true', () => {
+      // xAI Grok uses model variant selection for reasoning (grok-4-1-fast-reasoning vs grok-4-1-fast-non-reasoning)
+      // NOT the reasoningEffort API parameter - sending it causes HTTP 400
+      const reasoningModel = provider.languageModel('xai.grok-4-1-fast-reasoning');
+      const buildGenericChatRequest = (reasoningModel as any).buildGenericChatRequest.bind(reasoningModel);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Think step by step' }] }],
+        maxOutputTokens: 1000,
+        providerOptions: {
+          'oci-genai': {
+            reasoningEffort: 'HIGH', // Should be ignored for xAI
+          },
+        },
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      // xAI models should NEVER have reasoningEffort in the request
+      // Reasoning is controlled by model name suffix, not API parameter
+      expect(request).not.toHaveProperty('reasoningEffort');
+    });
+
+    it('should NOT send reasoningEffort parameter for xAI Grok 3 Mini models', () => {
+      // Grok 3 Mini models "think before responding" but also don't support reasoningEffort parameter
+      const miniModel = provider.languageModel('xai.grok-3-mini');
+      const buildGenericChatRequest = (miniModel as any).buildGenericChatRequest.bind(miniModel);
+
+      const options = {
+        prompt: [{ role: 'user' as const, content: [{ type: 'text' as const, text: 'Solve this problem' }] }],
+        maxOutputTokens: 1000,
+      };
+
+      const request = buildGenericChatRequest(options);
+
+      // Even though supportsReasoning=true, xAI models don't use the reasoningEffort parameter
+      expect(request).not.toHaveProperty('reasoningEffort');
+    });
+
     it('should set supportsReasoning=true for Cohere reasoning models', () => {
       const model = provider.languageModel('cohere.command-a-reasoning-08-2025');
       const swePreset = (model as any).swePreset;
@@ -2748,21 +2787,51 @@ describe('Multi-Turn Tool Conversation Regression', () => {
 
     expect(messages).toHaveLength(1);
     expect(messages[0].role).toBe('ASSISTANT');
-    // Gemini: tool calls go in toolCalls array at message level, content should have TEXT only
+    // Gemini with PARALLEL tool calls: OCI Generic format doesn't support parallel function calls
+    // So we convert to text fallback (same as Llama/xAI)
     const msg = messages[0] as any;
-    // Content should only contain the text part (or be null if empty)
-    if (msg.content) {
-      expect(msg.content.length).toBe(1);
-      expect(msg.content[0].type).toBe('TEXT');
-      expect(msg.content[0].text).toBe('I will run two commands.');
-    }
-    // Tool calls should be in the toolCalls array
+    const content = msg.content as any[];
+    expect(content.length).toBe(1);
+    expect(content[0].type).toBe('TEXT');
+    // Text should contain original message plus tool calls in text format
+    expect(content[0].text).toContain('I will run two commands.');
+    expect(content[0].text).toContain('[Called tool "bash"');
+    expect(content[0].text).toContain('{"command":"ls"}');
+    expect(content[0].text).toContain('{"command":"pwd"}');
+    // toolCalls array should NOT be present for parallel calls (we use text fallback)
+    expect(msg.toolCalls).toBeUndefined();
+  });
+
+  it('should handle assistant messages with SINGLE tool call for Gemini', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'I will run one command.' },
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"ls"}' }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('ASSISTANT');
+    // Gemini with SINGLE tool call: Use native toolCalls array
+    const msg = messages[0] as any;
+    // Content should only contain the text part
+    const content = msg.content as any[];
+    expect(content.length).toBe(1);
+    expect(content[0].type).toBe('TEXT');
+    expect(content[0].text).toBe('I will run one command.');
+    // Tool calls should be in the toolCalls array for single calls
     expect(msg.toolCalls).toBeDefined();
-    expect(msg.toolCalls.length).toBe(2);
+    expect(msg.toolCalls.length).toBe(1);
     expect(msg.toolCalls[0].type).toBe('FUNCTION');
     expect(msg.toolCalls[0].name).toBe('bash');
-    expect(msg.toolCalls[1].type).toBe('FUNCTION');
-    expect(msg.toolCalls[1].name).toBe('bash');
   });
 
   it('should handle assistant messages with mixed text and tool calls for Llama', () => {
