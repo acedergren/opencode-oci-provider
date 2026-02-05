@@ -157,6 +157,123 @@ describe('OCI Provider Tool Compatibility', () => {
       expect(cleanJsonSchema(123)).toBe(123);
       expect(cleanJsonSchema(true)).toBe(true);
     });
+
+    it('should strip additionalProperties and other Gemini-unsupported keywords', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      const schema = {
+        type: 'object',
+        title: 'TestSchema',
+        properties: {
+          name: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 100,
+            pattern: '^[a-z]+$',
+            default: 'test',
+            examples: ['example'],
+            format: 'email',
+          },
+          count: {
+            type: 'integer',
+            exclusiveMinimum: 0,
+            exclusiveMaximum: 100,
+          },
+          items: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 10,
+          },
+        },
+        additionalProperties: false,
+        $defs: { SomeRef: { type: 'string' } },
+        definitions: { AnotherRef: { type: 'number' } },
+        $id: 'https://example.com/schema',
+        $comment: 'This is a comment',
+      };
+
+      const cleaned = cleanJsonSchema(schema);
+
+      // These should be removed
+      expect(cleaned).not.toHaveProperty('additionalProperties');
+      expect(cleaned).not.toHaveProperty('title');
+      expect(cleaned).not.toHaveProperty('$defs');
+      expect(cleaned).not.toHaveProperty('definitions');
+      expect(cleaned).not.toHaveProperty('$id');
+      expect(cleaned).not.toHaveProperty('$comment');
+
+      // Property constraints should be removed
+      expect(cleaned.properties.name).not.toHaveProperty('minLength');
+      expect(cleaned.properties.name).not.toHaveProperty('maxLength');
+      expect(cleaned.properties.name).not.toHaveProperty('pattern');
+      expect(cleaned.properties.name).not.toHaveProperty('default');
+      expect(cleaned.properties.name).not.toHaveProperty('examples');
+      expect(cleaned.properties.name).not.toHaveProperty('format');
+      expect(cleaned.properties.count).not.toHaveProperty('exclusiveMinimum');
+      expect(cleaned.properties.count).not.toHaveProperty('exclusiveMaximum');
+      expect(cleaned.properties.items).not.toHaveProperty('minItems');
+      expect(cleaned.properties.items).not.toHaveProperty('maxItems');
+
+      // Core properties should remain
+      expect(cleaned.type).toBe('object');
+      expect(cleaned.properties.name.type).toBe('string');
+      expect(cleaned.properties.count.type).toBe('integer');
+      expect(cleaned.properties.items.type).toBe('array');
+    });
+
+    it('should preserve format and pattern when they are property names, not constraints', () => {
+      const model = provider.languageModel('google.gemini-2.5-flash');
+      const cleanJsonSchema = (model as any).cleanJsonSchema.bind(model);
+
+      // Schema like webfetch tool - 'format' is a property name, not a constraint
+      const webfetchSchema = {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'The URL to fetch',
+          },
+          format: {
+            type: 'string',
+            enum: ['text', 'markdown', 'html'],
+            description: 'Output format',
+          },
+        },
+        required: ['url', 'format'],
+      };
+
+      const cleanedWebfetch = cleanJsonSchema(webfetchSchema);
+
+      // 'format' property should be preserved (it's a property name, not a constraint)
+      expect(cleanedWebfetch.properties).toHaveProperty('format');
+      expect(cleanedWebfetch.properties.format.type).toBe('string');
+      expect(cleanedWebfetch.properties.format.enum).toEqual(['text', 'markdown', 'html']);
+      expect(cleanedWebfetch.required).toContain('format');
+
+      // Schema like glob/grep tools - 'pattern' is a property name, not a constraint
+      const globSchema = {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: 'Glob pattern to match',
+          },
+          path: {
+            type: 'string',
+            description: 'Directory to search in',
+          },
+        },
+        required: ['pattern'],
+      };
+
+      const cleanedGlob = cleanJsonSchema(globSchema);
+
+      // 'pattern' property should be preserved (it's a property name, not a constraint)
+      expect(cleanedGlob.properties).toHaveProperty('pattern');
+      expect(cleanedGlob.properties.pattern.type).toBe('string');
+      expect(cleanedGlob.required).toContain('pattern');
+    });
   });
 
   describe('convertTools', () => {
@@ -823,6 +940,7 @@ describe('Generic Format Tool Results Handling', () => {
           {
             type: 'tool-result' as const,
             toolCallId: 'call_pwd',
+            toolName: 'bash',
             output: { type: 'text' as const, value: '/home/user/project' }
           }
         ]
@@ -831,15 +949,20 @@ describe('Generic Format Tool Results Handling', () => {
 
     const messages = convertMessagesToGenericFormat(prompt);
 
+    // Llama (like xAI) rejects TOOL role and TOOL_CALL content, so convert to text
     expect(messages).toHaveLength(3);
     // User message
     expect(messages[0].role).toBe('USER');
-    // Assistant with tool call
+    // Assistant with tool call converted to TEXT
     expect(messages[1].role).toBe('ASSISTANT');
-    expect((messages[1].content as any[])[0].type).toBe('TOOL_CALL');
-    // Tool result
-    expect(messages[2].role).toBe('TOOL');
-    expect(messages[2].content[0].text).toBe('/home/user/project');
+    expect((messages[1].content as any[])[0].type).toBe('TEXT');
+    expect((messages[1].content as any[])[0].text).toContain('[Called tool "bash"');
+    // Tool result should be converted to USER message
+    expect(messages[2].role).toBe('USER');
+    const toolResultContent = messages[2].content as any[];
+    expect(toolResultContent[0].type).toBe('TEXT');
+    expect(toolResultContent[0].text).toContain('[Tool result from "bash"');
+    expect(toolResultContent[0].text).toContain('/home/user/project');
   });
 
   it('should handle JSON output type in tool results', () => {
@@ -905,20 +1028,21 @@ describe('Reasoning Support', () => {
       expect(swePreset.supportsReasoning).toBe(false);
     });
 
-    it('should set supportsReasoning=true for Google Gemini Pro models', () => {
+    it('should set supportsReasoning=false for Google Gemini Pro models (OCI limitation)', () => {
       const model = provider.languageModel('google.gemini-2.5-pro');
       const swePreset = (model as any).swePreset;
 
-      // Gemini 2.5 Pro has thinking enabled by default (cannot be turned off)
-      expect(swePreset.supportsReasoning).toBe(true);
+      // OCI GenAI does NOT expose reasoningEffort parameter for Gemini models
+      // Even though Gemini 2.5 has reasoning capabilities, OCI doesn't support the API parameter
+      expect(swePreset.supportsReasoning).toBe(false);
     });
 
-    it('should set supportsReasoning=true for Google Gemini Flash models', () => {
+    it('should set supportsReasoning=false for Google Gemini Flash models (OCI limitation)', () => {
       const model = provider.languageModel('google.gemini-2.5-flash');
       const swePreset = (model as any).swePreset;
 
-      // Gemini 2.5 Flash has thinking enabled by default
-      expect(swePreset.supportsReasoning).toBe(true);
+      // OCI GenAI does NOT expose reasoningEffort parameter for Gemini models
+      expect(swePreset.supportsReasoning).toBe(false);
     });
 
     it('should set supportsReasoning=false for Google Gemini Flash-Lite models', () => {
@@ -936,12 +1060,22 @@ describe('Reasoning Support', () => {
       expect(swePreset.supportsReasoning).toBe(false);
     });
 
-    it('should set supportsReasoning=true for Meta Llama 4 models', () => {
-      const maverick = provider.languageModel('meta.llama-4-maverick-17b-128e-instruct-fp8');
-      const scout = provider.languageModel('meta.llama-4-scout-17b-16e-instruct');
+    it('should set supportsReasoning=false for Meta Llama 4 models (OCI limitation)', () => {
+      // Note: Llama 4 models require dedicated AI cluster, but we can still verify the preset
+      // These models may have internal reasoning but OCI doesn't expose reasoningEffort parameter
+      const dedicatedProvider = createOCI({
+        region: 'us-chicago-1',
+        compartmentId: 'test-compartment',
+        servingMode: 'dedicated',  // Required for Llama 4 models
+        endpointId: 'test-endpoint',
+      });
 
-      expect((maverick as any).swePreset.supportsReasoning).toBe(true);
-      expect((scout as any).swePreset.supportsReasoning).toBe(true);
+      const maverick = dedicatedProvider.languageModel('meta.llama-4-maverick-17b-128e-instruct-fp8');
+      const scout = dedicatedProvider.languageModel('meta.llama-4-scout-17b-16e-instruct');
+
+      // OCI GenAI does NOT expose reasoningEffort for Meta Llama models
+      expect((maverick as any).swePreset.supportsReasoning).toBe(false);
+      expect((scout as any).swePreset.supportsReasoning).toBe(false);
     });
 
     it('should set supportsReasoning=true for OpenAI gpt-oss models', () => {
@@ -956,8 +1090,8 @@ describe('Reasoning Support', () => {
 
   describe('buildGenericChatRequest with reasoning', () => {
     it('should include reasoningEffort for models that support reasoning', () => {
-      // Use Gemini which supports reasoning (unlike Grok which throws error)
-      const model = provider.languageModel('google.gemini-2.5-flash');
+      // Use OpenAI gpt-oss which supports reasoning (OCI limitation: Gemini doesn't expose reasoningEffort)
+      const model = provider.languageModel('openai.gpt-oss-120b');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {
@@ -995,8 +1129,8 @@ describe('Reasoning Support', () => {
     });
 
     it('should default to MEDIUM reasoningEffort when not specified for reasoning models', () => {
-      // Use Gemini which supports reasoning (unlike Grok which throws error)
-      const model = provider.languageModel('google.gemini-2.5-flash');
+      // Use OpenAI gpt-oss which supports reasoning (OCI limitation: Gemini doesn't expose reasoningEffort)
+      const model = provider.languageModel('openai.gpt-oss-120b');
       const buildGenericChatRequest = (model as any).buildGenericChatRequest.bind(model);
 
       const options = {

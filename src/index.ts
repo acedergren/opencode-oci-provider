@@ -192,6 +192,93 @@ function createUsage(promptTokens?: number, completionTokens?: number): Language
 }
 
 /**
+ * Parse OCI API errors and return user-friendly messages.
+ * OCI errors are often cryptic (e.g., "Please pass in correct format of request")
+ * and don't provide actionable information.
+ */
+function parseOCIError(error: any, modelId: string): Error {
+  const originalMessage = error?.message || String(error);
+  
+  // Extract useful info from OCI error structure
+  const statusCode = error?.statusCode || error?.response?.status;
+  const serviceCode = error?.serviceCode || error?.code;
+  const opcRequestId = error?.opcRequestId;
+  
+  // Common OCI error patterns and their user-friendly translations
+  const errorPatterns: Array<{ pattern: RegExp | string; message: string; hint?: string }> = [
+    {
+      pattern: /Please pass in correct format of request/i,
+      message: 'OCI API rejected the request format',
+      hint: 'This usually indicates an issue with message structure or tool call format. Enable OCI_DEBUG=1 for details.',
+    },
+    {
+      pattern: /Service request limit is exceeded|request is throttled/i,
+      message: 'Rate limit exceeded',
+      hint: 'Wait a moment before retrying. Consider using a different model or region.',
+    },
+    {
+      pattern: /NotAuthorizedOrNotFound|404/i,
+      message: 'Model or resource not found',
+      hint: `Verify that model "${modelId}" is available in your region and compartment.`,
+    },
+    {
+      pattern: /InvalidParameter|validation error/i,
+      message: 'Invalid parameter in request',
+      hint: 'Check model-specific parameter limits (temperature, max_tokens, etc.).',
+    },
+    {
+      pattern: /Authentication|Unauthorized|401/i,
+      message: 'Authentication failed',
+      hint: 'Check your OCI config profile and API key setup.',
+    },
+    {
+      pattern: /InternalServerError|500|503/i,
+      message: 'OCI service error',
+      hint: 'This is an OCI-side issue. Try again or check OCI status page.',
+    },
+    {
+      pattern: /context.*length|token.*limit|too long/i,
+      message: 'Input exceeds model context length',
+      hint: 'Reduce the size of your prompt or conversation history.',
+    },
+  ];
+  
+  // Find matching pattern
+  for (const { pattern, message, hint } of errorPatterns) {
+    const matches = typeof pattern === 'string' 
+      ? originalMessage.includes(pattern)
+      : pattern.test(originalMessage);
+    
+    if (matches) {
+      let friendlyMessage = `[OCI GenAI] ${message}`;
+      if (hint) {
+        friendlyMessage += `\n  Hint: ${hint}`;
+      }
+      if (process.env.OCI_DEBUG) {
+        friendlyMessage += `\n  Original error: ${originalMessage}`;
+        if (opcRequestId) {
+          friendlyMessage += `\n  Request ID: ${opcRequestId}`;
+        }
+      }
+      return new Error(friendlyMessage);
+    }
+  }
+  
+  // No pattern matched - return enhanced generic error
+  let genericMessage = `[OCI GenAI] API error for model "${modelId}"`;
+  if (statusCode) {
+    genericMessage += ` (HTTP ${statusCode})`;
+  }
+  genericMessage += `: ${originalMessage}`;
+  
+  if (process.env.OCI_DEBUG && opcRequestId) {
+    genericMessage += `\n  Request ID: ${opcRequestId}`;
+  }
+  
+  return new Error(genericMessage);
+}
+
+/**
  * Convert JSON Schema to Cohere parameter definitions
  */
 function jsonSchemaToCohereparams(schema: JSONSchema7): Record<string, any> {
@@ -270,7 +357,12 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       chatRequest,
     };
 
-    const response = await this.client.chat({ chatDetails });
+    let response;
+    try {
+      response = await this.client.chat({ chatDetails });
+    } catch (error) {
+      throw parseOCIError(error, this.modelId);
+    }
 
     if (!response || !('chatResult' in response)) {
       throw new Error('Unexpected response type from OCI GenAI');
@@ -413,6 +505,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     const client = this.client;
     const modelFamily = this.modelFamily;
     const swePreset = this.swePreset;
+    const modelId = this.modelId;
 
     const stream = new ReadableStream<LanguageModelV2StreamPart>({
       async start(controller) {
@@ -619,7 +712,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           });
           controller.close();
         } catch (error) {
-          controller.enqueue({ type: 'error', error });
+          const parsedError = parseOCIError(error, modelId);
+          controller.enqueue({ type: 'error', error: parsedError });
           controller.close();
         }
       },
@@ -774,25 +868,80 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
     return tools
       .filter((tool): tool is LanguageModelV2FunctionTool => tool.type === 'function')
-      .map(tool => ({
-        type: 'FUNCTION',
-        name: tool.name,
-        description: tool.description,
-        parameters: this.cleanJsonSchema(tool.inputSchema),
-      }));
+      .map(tool => {
+        // Debug: log tool schema before cleaning
+        if (process.env.OCI_DEBUG) {
+          console.error('[OCI Debug] Converting generic tool:', tool.name);
+          console.error('[OCI Debug] Raw inputSchema:', JSON.stringify(tool.inputSchema, null, 2));
+        }
+        
+        const cleanedParams = this.cleanJsonSchema(tool.inputSchema);
+        
+        if (process.env.OCI_DEBUG) {
+          console.error('[OCI Debug] Cleaned parameters:', JSON.stringify(cleanedParams, null, 2));
+        }
+        
+        return {
+          type: 'FUNCTION',
+          name: tool.name,
+          description: tool.description,
+          parameters: cleanedParams,
+        };
+      });
   }
 
   /**
-   * Clean JSON Schema for compatibility with Google Gemini via OCI.
-   * Removes $schema, ref, and other unsupported properties.
+   * Clean JSON Schema for compatibility with Google Gemini and other models via OCI.
+   * Removes unsupported properties that cause validation errors.
+   * Based on common patterns from ai-sdk-provider-gemini-cli, claude-worker-proxy, etc.
    */
   private cleanJsonSchema(schema: any): any {
     if (!schema || typeof schema !== 'object') return schema;
 
+    // Keywords that Gemini and other models don't support as schema constraints.
+    // Note: 'pattern' and 'format' are only removed when they're validation constraints,
+    // not when they're property names in the properties object.
+    const UNSUPPORTED_KEYWORDS = [
+      '$schema',
+      '$ref',
+      'ref',
+      '$defs',
+      'definitions',
+      '$id',
+      '$comment',
+      'additionalProperties',  // Gemini rejects this
+      'propertyNames',
+      'title',                 // Often rejected
+      'examples',              // Often rejected
+      'default',               // Often rejected
+      'const',                 // Not widely supported
+      // Note: 'format' intentionally NOT here - it could be a property name
+      'minLength',
+      'maxLength',
+      // Note: 'pattern' intentionally NOT here - it could be a property name
+      'minItems',
+      'maxItems',
+      'exclusiveMinimum',
+      'exclusiveMaximum',
+    ];
+
     const cleaned: any = {};
     for (const [key, value] of Object.entries(schema)) {
-      // Skip properties Gemini doesn't support
-      if (key === '$schema' || key === 'ref' || key === '$ref') continue;
+      // Skip unsupported keywords
+      if (UNSUPPORTED_KEYWORDS.includes(key)) continue;
+
+      // Special handling for 'pattern' - only remove if it's a regex constraint
+      // (i.e., when it's a string value at the same level as type: 'string')
+      if (key === 'pattern' && typeof value === 'string' && schema.type === 'string') {
+        continue; // Skip pattern regex constraints
+      }
+
+      // Special handling for 'format' - only remove if it's a format constraint
+      // (i.e., when it's a string value at the same level as type: 'string')
+      // Preserve 'format' when it's a property name in tools like webfetch
+      if (key === 'format' && typeof value === 'string' && schema.type === 'string') {
+        continue; // Skip format constraints like "email", "uri", "date-time"
+      }
 
       // Recursively clean nested objects
       if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -924,6 +1073,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
     // Check if this is an xAI model - they need special tool history handling
     const isXAI = this.modelId.startsWith('xai.');
+    // Check if this is a Llama model - they also reject TOOL role messages
+    const isLlama = this.modelId.startsWith('meta.llama');
 
     const messages: oci.models.Message[] = [];
 
@@ -982,9 +1133,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
             };
             content.push(textContent);
           } else if (part.type === 'tool-call') {
-            if (isXAI) {
-              // For xAI/Grok: Convert tool calls to text representation
-              // Grok rejects TOOL_CALL content type in message history
+            if (isXAI || isLlama) {
+              // For xAI/Grok and Llama: Convert tool calls to text representation
+              // These models reject TOOL_CALL content type in message history
               const args = typeof part.input === 'string' ? part.input : JSON.stringify(part.input);
               toolCallTexts.push(`[Called tool "${part.toolName}" with: ${args}]`);
             } else {
@@ -999,8 +1150,8 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
           }
         }
 
-        // For xAI: append tool call descriptions as text
-        if (isXAI && toolCallTexts.length > 0) {
+        // For xAI and Llama: append tool call descriptions as text
+        if ((isXAI || isLlama) && toolCallTexts.length > 0) {
           const toolCallText = toolCallTexts.join('\n');
           // Add as text content or append to existing text
           if (content.length > 0 && content[0].type === oci.models.TextContent.type) {
@@ -1040,9 +1191,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
               resultText = typeof output === 'object' ? JSON.stringify(output) : String(output);
             }
 
-            if (isXAI) {
-              // For xAI/Grok: Convert tool results to USER messages
-              // Grok rejects TOOL role messages
+            if (isXAI || isLlama) {
+              // For xAI/Grok and Llama: Convert tool results to USER messages
+              // These models reject TOOL role messages
               const toolName = (part as any).toolName || 'tool';
               messages.push({
                 role: 'USER',
