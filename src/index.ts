@@ -1535,8 +1535,10 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
       request.presencePenalty = this.applyDefaults(options.presencePenalty, this.swePreset.presencePenalty);
     }
 
-    // Include reasoningEffort for models that support reasoning
-    if (this.swePreset.supportsReasoning) {
+    // Include reasoningEffort for models that support reasoning API parameter
+    // Note: xAI Grok models use model variant selection (grok-4-1-fast-reasoning vs non-reasoning)
+    // instead of reasoningEffort parameter, so we skip it for xAI
+    if (this.swePreset.supportsReasoning && !this.modelId.startsWith('xai.')) {
       const providerOptions = options.providerOptions?.['oci-genai'] as Record<string, unknown> | undefined;
       const reasoningEffort = providerOptions?.reasoningEffort as string | undefined;
       // Default to MEDIUM if not specified
