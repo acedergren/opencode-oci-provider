@@ -4,3 +4,16 @@ dist/
 .DS_Store
 .env*
 !.env.example
+
+# Local test files
+test-*.mjs
+
+# Tool/IDE directories
+.firecrawl/
+.opencode/
+.serena/
+
+# Audit files
+skill-audit*.ts
+skill-audit*.json
+skill-evaluations*.md

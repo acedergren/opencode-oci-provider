@@ -1245,7 +1245,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         content.unshift({ type: 'reasoning', text: reasoningContent } as LanguageModelV2Reasoning);
       }
 
-      finishReason = mapFinishReason(choice?.finishReason);
+      // Check if we have tool calls - if so, finishReason should be 'tool-calls'
+      const hasToolCalls = content.some(c => c.type === 'tool-call');
+      finishReason = hasToolCalls ? 'tool-calls' : mapFinishReason(choice?.finishReason);
       const usageInfo = genericResponse?.usage;
       promptTokens = usageInfo?.promptTokens || 0;
       completionTokens = usageInfo?.completionTokens || 0;
@@ -1630,11 +1632,52 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
   }
 
   /**
+   * Convert a Zod v4 schema to JSON Schema if needed.
+   * AI SDK v5 with Zod v4 may pass raw Zod schema objects instead of JSON Schema.
+   * This method detects Zod schemas and converts them using Zod's built-in toJSONSchema.
+   */
+  private ensureJsonSchema(schema: any): any {
+    if (!schema || typeof schema !== 'object') return schema;
+
+    // Check if this looks like a Zod v4 schema (has _zod property or def.type)
+    // Zod v4 schemas have a specific structure with _zod, def, type at top level
+    const isZodSchema = (
+      schema._zod !== undefined ||
+      (schema.def && schema.def.type) ||
+      (schema.type === 'object' && schema.shape)
+    );
+
+    if (isZodSchema) {
+      try {
+        // Dynamically import zod's toJSONSchema
+        // This is a sync workaround - we detect if zod is available
+        const zod = require('zod');
+        if (zod.toJSONSchema) {
+          const jsonSchema = zod.toJSONSchema(schema);
+          if (process.env.OCI_DEBUG) {
+            console.error('[OCI Debug] Converted Zod schema to JSON Schema:', JSON.stringify(jsonSchema, null, 2));
+          }
+          return jsonSchema;
+        }
+      } catch (e) {
+        // zod not available or toJSONSchema not present, return as-is
+        if (process.env.OCI_DEBUG) {
+          console.error('[OCI Debug] Could not convert Zod schema:', e);
+        }
+      }
+    }
+
+    return schema;
+  }
+
+  /**
    * Clean JSON Schema for compatibility with Google Gemini and other models via OCI.
    * Removes unsupported properties that cause validation errors.
    * Based on common patterns from ai-sdk-provider-gemini-cli, claude-worker-proxy, etc.
    */
   private cleanJsonSchema(schema: any): any {
+    // First ensure we have a JSON Schema (convert from Zod if needed)
+    schema = this.ensureJsonSchema(schema);
     if (!schema || typeof schema !== 'object') return schema;
 
     // Keywords that Gemini and other models don't support as schema constraints.
@@ -2000,6 +2043,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
                 name: part.toolName,
                 arguments: typeof part.input === 'string' ? part.input : JSON.stringify(part.input),
               } as oci.models.FunctionCall);
+              // Also track for potential text fallback if parallel
+              const args = typeof part.input === 'string' ? part.input : JSON.stringify(part.input);
+              toolCallTexts.push(`[Called tool "${part.toolName}" (${part.toolCallId}) with: ${args}]`);
             } else {
               // Handle tool calls in assistant messages (standard format)
               content.push({
@@ -2033,13 +2079,30 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
         };
 
         // For Google/Gemini: Add toolCalls array at message level
-        if (isGoogle && toolCalls.length > 0) {
+        // But only for single tool calls - parallel calls need text fallback
+        if (isGoogle && toolCalls.length === 1) {
           assistantMsg.toolCalls = toolCalls;
+        } else if (isGoogle && toolCalls.length > 1) {
+          // Parallel tool calls: use text fallback instead of toolCalls array
+          // OCI's Generic format doesn't support parallel function calls properly for Gemini
+          const toolCallText = toolCallTexts.join('\n');
+          if (content.length > 0 && content[0].type === oci.models.TextContent.type) {
+            (content[0] as oci.models.TextContent).text += '\n' + toolCallText;
+          } else {
+            content.unshift({
+              type: oci.models.TextContent.type,
+              text: toolCallText,
+            } as oci.models.TextContent);
+          }
+          assistantMsg.content = content;
         }
 
         messages.push(assistantMsg as oci.models.AssistantMessage);
       } else if (role === 'tool') {
         // Handle tool result messages
+        // For Google/Gemini: Collect all tool results to batch them
+        const googleToolResults: Array<{ toolCallId: string; text: string; toolName: string }> = [];
+        
         for (const part of message.content) {
           if (part.type === 'tool-result') {
             // V2 uses `output` with { type, value } structure
@@ -2073,17 +2136,9 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
                 } as oci.models.TextContent],
               } as oci.models.UserMessage);
             } else if (isGoogle) {
-              // For Google/Gemini models: Use standard ToolMessage format
-              // OCI Generic format expects toolCallId at message level with TEXT content
-              const textContent: oci.models.TextContent = {
-                type: oci.models.TextContent.type,
-                text: resultText,
-              };
-              messages.push({
-                role: 'TOOL',
-                toolCallId: part.toolCallId,
-                content: [textContent],
-              } as oci.models.ToolMessage);
+              // For Google/Gemini: Collect tool results to batch them
+              const toolName = (part as any).toolName || 'tool';
+              googleToolResults.push({ toolCallId: part.toolCallId, text: resultText, toolName });
             } else {
               const textContent: oci.models.TextContent = {
                 type: oci.models.TextContent.type,
@@ -2095,6 +2150,35 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
                 toolCallId: part.toolCallId,
               } as any);
             }
+          }
+        }
+        
+        // For Google/Gemini: Create function response message(s)
+        // OCI Generic format for Gemini has limitations with parallel tool calls
+        if (isGoogle && googleToolResults.length > 0) {
+          if (googleToolResults.length === 1) {
+            // Single result: use standard OCI TOOL message format
+            messages.push({
+              role: 'TOOL',
+              toolCallId: googleToolResults[0].toolCallId,
+              content: [{
+                type: oci.models.TextContent.type,
+                text: googleToolResults[0].text,
+              } as oci.models.TextContent],
+            } as oci.models.ToolMessage);
+          } else {
+            // Multiple results: OCI's Generic format doesn't properly support parallel
+            // function responses for Gemini. Combine all tool results into a single
+            // USER message with all results as text parts.
+            const combinedParts = googleToolResults.map(result => ({
+              type: oci.models.TextContent.type,
+              text: `[Tool result from "${result.toolName}" (${result.toolCallId}): ${result.text}]`,
+            } as oci.models.TextContent));
+            
+            messages.push({
+              role: 'USER',
+              content: combinedParts,
+            } as oci.models.UserMessage);
           }
         }
       }
