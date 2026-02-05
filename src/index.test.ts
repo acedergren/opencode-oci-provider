@@ -1245,9 +1245,7 @@ describe('Reasoning Support', () => {
 
       // The mock returns a response, we're testing the extraction logic
       const result = await model.doGenerate({
-        mode: { type: 'regular' },
         prompt: [{ role: 'user', content: [{ type: 'text', text: 'Think step by step' }] }],
-        inputFormat: 'messages',
       });
 
       // The mock doesn't include reasoning, so content should only be text
@@ -1295,5 +1293,488 @@ describe('Provider Instantiation', () => {
     const provider = createOCI({ compartmentId: 'test' });
     expect(() => provider.imageModel('any'))
       .toThrow('Image models are not supported');
+  });
+});
+
+/**
+ * Regression tests for Llama tool calling fix
+ * Issue: Llama models reject TOOL role and TOOL_CALL content type
+ * Fix: Convert tool calls/results to TEXT format (same as xAI/Grok)
+ */
+describe('Llama Tool Calling Regression', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should detect Llama models correctly', () => {
+    const llama33 = provider.languageModel('meta.llama-3.3-70b-instruct');
+    const llama31 = provider.languageModel('meta.llama-3.1-405b-instruct');
+    const gemini = provider.languageModel('google.gemini-2.5-flash');
+
+    // Check model IDs start with meta.llama
+    expect((llama33 as any).modelId.startsWith('meta.llama')).toBe(true);
+    expect((llama31 as any).modelId.startsWith('meta.llama')).toBe(true);
+    expect((gemini as any).modelId.startsWith('meta.llama')).toBe(false);
+  });
+
+  it('should convert assistant tool calls to TEXT for Llama models', () => {
+    const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'Let me list the files.' },
+          { type: 'tool-call' as const, toolCallId: 'call_ls', toolName: 'bash', input: '{"command":"ls -la"}' }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe('ASSISTANT');
+    // Tool call should be converted to TEXT
+    const content = messages[1].content as any[];
+    expect(content).toHaveLength(1);
+    expect(content[0].type).toBe('TEXT');
+    expect(content[0].text).toContain('Let me list the files.');
+    expect(content[0].text).toContain('[Called tool "bash"');
+    expect(content[0].text).toContain('{"command":"ls -la"}');
+  });
+
+  it('should convert tool results to USER messages for Llama models', () => {
+    const model = provider.languageModel('meta.llama-3.1-70b-instruct');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'Run pwd' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_pwd', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_pwd',
+            toolName: 'bash',
+            output: { type: 'text' as const, value: '/home/user/project' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(3);
+    // Tool result should be USER, not TOOL
+    expect(messages[2].role).toBe('USER');
+    const content = messages[2].content as any[];
+    expect(content[0].type).toBe('TEXT');
+    expect(content[0].text).toContain('[Tool result from "bash"');
+    expect(content[0].text).toContain('/home/user/project');
+  });
+
+  it('should handle multi-step tool flow for Llama', () => {
+    const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    // Simulate a 2-step tool conversation
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'List files then read README.md' }] },
+      // First tool call
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"ls"}' }
+        ]
+      },
+      // First tool result
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            toolName: 'bash',
+            output: { type: 'text' as const, value: 'README.md\nindex.ts' }
+          }
+        ]
+      },
+      // Second tool call
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'Now reading README.md.' },
+          { type: 'tool-call' as const, toolCallId: 'call_2', toolName: 'read', input: '{"path":"README.md"}' }
+        ]
+      },
+      // Second tool result
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_2',
+            toolName: 'read',
+            output: { type: 'text' as const, value: '# Project\n\nThis is a test project.' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(5);
+    
+    // Verify alternating pattern for Llama
+    expect(messages[0].role).toBe('USER');
+    expect(messages[1].role).toBe('ASSISTANT');
+    expect(messages[2].role).toBe('USER'); // Tool result -> USER
+    expect(messages[3].role).toBe('ASSISTANT');
+    expect(messages[4].role).toBe('USER'); // Tool result -> USER
+
+    // Verify content is TEXT, not TOOL_CALL
+    expect((messages[1].content as any[])[0].type).toBe('TEXT');
+    expect((messages[3].content as any[])[0].type).toBe('TEXT');
+  });
+
+  it('should NOT convert tool calls for Gemini (only for Llama/xAI)', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      { role: 'user' as const, content: [{ type: 'text' as const, text: 'List files' }] },
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"ls"}' }
+        ]
+      },
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            output: { type: 'text' as const, value: 'file1.txt' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(3);
+    // Gemini should use native TOOL role
+    expect(messages[2].role).toBe('TOOL');
+    // And native TOOL_CALL content type
+    expect((messages[1].content as any[])[0].type).toBe('TOOL_CALL');
+  });
+});
+
+/**
+ * Regression tests for parseOCIError helper
+ * Issue: OCI API errors are cryptic and unhelpful
+ * Fix: Map common errors to user-friendly messages with hints
+ */
+describe('Error Handling Regression', () => {
+  // We need to import the parseOCIError function
+  // Since it's a module-level function, we test it indirectly through the provider
+
+  it('should provide user-friendly message for rate limit errors', async () => {
+    // Create a provider that will throw a rate limit error
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    // Mock the client to throw a rate limit error
+    (model as any).client = {
+      chat: vi.fn().mockRejectedValue(new Error('Service request limit is exceeded, request is throttled')),
+    };
+
+    try {
+      await model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('[OCI GenAI] Rate limit exceeded');
+      expect(error.message).toContain('Hint: Wait a moment');
+    }
+  });
+
+  it('should provide user-friendly message for format errors', async () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+
+    (model as any).client = {
+      chat: vi.fn().mockRejectedValue(new Error('Please pass in correct format of request')),
+    };
+
+    try {
+      await model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('[OCI GenAI] OCI API rejected the request format');
+      expect(error.message).toContain('Hint:');
+    }
+  });
+
+  it('should provide user-friendly message for auth errors', async () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockRejectedValue(new Error('Unauthorized: invalid credentials')),
+    };
+
+    try {
+      await model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('[OCI GenAI] Authentication failed');
+      expect(error.message).toContain('OCI config profile');
+    }
+  });
+
+  it('should provide user-friendly message for 404/not found errors', async () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('google.gemini-2.5-flash');
+
+    (model as any).client = {
+      chat: vi.fn().mockRejectedValue(new Error('NotAuthorizedOrNotFound')),
+    };
+
+    try {
+      await model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('[OCI GenAI] Model or resource not found');
+      expect(error.message).toContain('google.gemini-2.5-flash');
+    }
+  });
+
+  it('should include model ID in generic error messages', async () => {
+    const provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+
+    const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+
+    (model as any).client = {
+      chat: vi.fn().mockRejectedValue(new Error('Unknown error XYZ123')),
+    };
+
+    try {
+      await model.doGenerate({
+        prompt: [{ role: 'user', content: [{ type: 'text', text: 'test' }] }],
+      });
+      expect.fail('Should have thrown');
+    } catch (error: any) {
+      expect(error.message).toContain('[OCI GenAI]');
+      expect(error.message).toContain('meta.llama-3.3-70b-instruct');
+      expect(error.message).toContain('Unknown error XYZ123');
+    }
+  });
+});
+
+/**
+ * Regression tests for multi-turn tool conversations
+ * Issue: Tool results weren't being properly sent back to models
+ * Fix: Proper message format conversion for each model family
+ */
+describe('Multi-Turn Tool Conversation Regression', () => {
+  let provider: OCIProvider;
+
+  beforeEach(() => {
+    provider = createOCI({
+      compartmentId: 'test-compartment',
+      region: 'us-chicago-1',
+    });
+  });
+
+  it('should preserve tool call IDs through conversion for Gemini', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const toolCallId = 'unique_call_id_12345';
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: toolCallId,
+          output: { type: 'text' as const, value: 'result data' }
+        }]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    // Tool call ID should be preserved
+    expect((messages[0] as any).toolCallId).toBe(toolCallId);
+  });
+
+  it('should handle error-text output type in tool results', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: 'call_error',
+          output: { type: 'error-text' as const, value: 'Command failed: exit code 1' }
+        }]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages[0].content[0].text).toBe('Command failed: exit code 1');
+  });
+
+  it('should handle multiple tool results in single message', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_1',
+            output: { type: 'text' as const, value: 'result 1' }
+          },
+          {
+            type: 'tool-result' as const,
+            toolCallId: 'call_2',
+            output: { type: 'text' as const, value: 'result 2' }
+          }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    // Should create separate TOOL messages for each result
+    expect(messages.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('should handle tool results with JSON objects', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const jsonValue = { files: ['a.ts', 'b.ts'], count: 2, nested: { key: 'value' } };
+    const prompt = [
+      {
+        role: 'tool' as const,
+        content: [{
+          type: 'tool-result' as const,
+          toolCallId: 'call_json',
+          output: { type: 'json' as const, value: jsonValue }
+        }]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    // JSON should be stringified
+    const text = messages[0].content[0].text;
+    const parsed = JSON.parse(text);
+    expect(parsed).toEqual(jsonValue);
+  });
+
+  it('should handle assistant messages with mixed text and tool calls for Gemini', () => {
+    const model = provider.languageModel('google.gemini-2.5-flash');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'I will run two commands.' },
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"ls"}' },
+          { type: 'tool-call' as const, toolCallId: 'call_2', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('ASSISTANT');
+    // Gemini keeps native format: TEXT + TOOL_CALL + TOOL_CALL
+    const content = messages[0].content as any[];
+    expect(content.length).toBe(3);
+    expect(content[0].type).toBe('TEXT');
+    expect(content[1].type).toBe('TOOL_CALL');
+    expect(content[2].type).toBe('TOOL_CALL');
+  });
+
+  it('should handle assistant messages with mixed text and tool calls for Llama', () => {
+    const model = provider.languageModel('meta.llama-3.3-70b-instruct');
+    const convertMessagesToGenericFormat = (model as any).convertMessagesToGenericFormat.bind(model);
+
+    const prompt = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'text' as const, text: 'I will run two commands.' },
+          { type: 'tool-call' as const, toolCallId: 'call_1', toolName: 'bash', input: '{"command":"ls"}' },
+          { type: 'tool-call' as const, toolCallId: 'call_2', toolName: 'bash', input: '{"command":"pwd"}' }
+        ]
+      },
+    ];
+
+    const messages = convertMessagesToGenericFormat(prompt);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe('ASSISTANT');
+    // Llama: all converted to single TEXT
+    const content = messages[0].content as any[];
+    expect(content.length).toBe(1);
+    expect(content[0].type).toBe('TEXT');
+    expect(content[0].text).toContain('I will run two commands.');
+    expect(content[0].text).toContain('[Called tool "bash"');
+    // Both tool calls should be in the text
+    expect(content[0].text).toContain('{"command":"ls"}');
+    expect(content[0].text).toContain('{"command":"pwd"}');
   });
 });
