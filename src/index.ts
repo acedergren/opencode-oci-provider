@@ -666,7 +666,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
     const hasToolResults = toolResults && toolResults.length > 0;
 
     const request: any = {
-      apiFormat: oci.models.CohereChatRequest.apiFormat,
+      apiFormat: 'COHERE',
       message,
       chatHistory,
       maxTokens: options.maxOutputTokens,
@@ -706,7 +706,7 @@ class OCIChatLanguageModelV2 implements LanguageModelV2 {
 
     // Base request
     const request: any = {
-      apiFormat: oci.models.GenericChatRequest.apiFormat,
+      apiFormat: 'GENERIC',
       messages,
       maxTokens: options.maxOutputTokens,
       temperature: this.applyDefaults(options.temperature, this.swePreset.temperature),
